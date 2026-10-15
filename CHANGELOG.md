@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- Jobs run under the shell Pi resolves for the built-in bash tool, honouring `shellPath`. An invalid path warns and falls back to the default shell.
+
 ## 0.1.0
 
 - Initial standalone Git release of the background job tools and `/jobs` interface.

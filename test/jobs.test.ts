@@ -100,7 +100,7 @@ test("timeout enforcement kills the process group and flags the completion", asy
 
 test("log files are capped and marked when truncated", async (t) => {
   const dir = await workspace(t);
-  const manager = new JobManager(dir, 128);
+  const manager = new JobManager(dir, { maxLogBytes: 128 });
   t.after(() => { manager.killAllSync(); manager.dispose(); });
   const done = waitCompletion(manager);
   const { record } = await manager.start("node -e \"process.stdout.write('x'.repeat(5000))\"");

@@ -51,7 +51,19 @@ export interface JobStatus {
   tail: string;
 }
 
+export interface ShellCommand {
+  shell: string;
+  args: string[];
+  transport?: "argv" | "stdin";
+}
+
+export interface JobManagerOptions {
+  maxLogBytes?: number;
+  shell?: ShellCommand;
+}
 export type CompletionListener = (completion: JobCompletion) => void;
+
+const DEFAULT_SHELL: ShellCommand = { shell: "sh", args: ["-c"] };
 
 export const defaultJobsDir = (): string => process.env.PI_JOBS_DIR ?? join(tmpdir(), "pi_jobs");
 
@@ -132,6 +144,7 @@ export class JobManager {
   readonly dir: string;
   readonly registryPath: string;
   readonly maxLogBytes: number;
+  readonly shell: ShellCommand;
   private registry: Registry = {};
   private readonly children = new Map<string, ChildProcess>();
   private readonly restored = new Set<string>();
@@ -142,13 +155,15 @@ export class JobManager {
   private readonly exitWaiters = new Map<string, Array<() => void>>();
   private readonly timeoutTimers = new Map<string, NodeJS.Timeout>();
   private readonly logStreams = new Map<string, WriteStream>();
+  private readonly stdinClosed = new Set<string>();
   private pollTimer?: NodeJS.Timeout;
   private saveChain: Promise<void> = Promise.resolve();
 
-  constructor(dir = defaultJobsDir(), maxLogBytes = MAX_LOG_BYTES) {
+  constructor(dir = defaultJobsDir(), options: JobManagerOptions = {}) {
     this.dir = dir;
     this.registryPath = join(dir, "registry.json");
-    this.maxLogBytes = maxLogBytes;
+    this.maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
+    this.shell = options.shell ?? DEFAULT_SHELL;
   }
 
   subscribe(listener: CompletionListener): () => void {
@@ -198,12 +213,22 @@ export class JobManager {
     const logPath = join(this.dir, `${id}.log`);
     const startTime = Math.floor(Date.now() / 1000);
 
-    // The tool's contract is to run a shell command, so a shell is required. Detached mode makes the
-    // child a process-group leader, which is what lets termination reach its descendants.
-    const child = spawn(command, { shell: true, detached: true, stdio: ["pipe", "pipe", "pipe"], cwd });
+    // The tool's contract is to run a shell command, so a shell is required. The shell is the one Pi
+    // resolved for the user (settings.shellPath). Detached mode makes the child a process-group
+    // leader, which is what lets termination reach its descendants.
+    const fromStdin = this.shell.transport === "stdin";
+    const child = spawn(this.shell.shell, fromStdin ? this.shell.args : [...this.shell.args, command], {
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      cwd,
+    });
     if (!child.pid) {
       child.kill("SIGKILL");
       throw new Error("Failed to start the background process.");
+    }
+    if (fromStdin) {
+      this.stdinClosed.add(id);
+      child.stdin?.end(command);
     }
     const record: JobRecord = { pid: child.pid, pgid: child.pid, command, log_path: logPath, start_time: startTime, timeout };
     this.registry[id] = record;
@@ -262,6 +287,7 @@ export class JobManager {
   send(id: string, input: string): void {
     const child = this.children.get(id);
     if (!child || !this.registry[id]) throw new Error(`Job ${id} has no attached stdin (not started by this process).`);
+    if (this.stdinClosed.has(id)) throw new Error(`Job ${id} receives its command on stdin; bash_send is unavailable.`);
     if (!child.stdin || child.stdin.destroyed) throw new Error(`Job ${id} is not accepting input.`);
     child.stdin.write(`${input}\n`);
   }
@@ -369,6 +395,7 @@ export class JobManager {
     delete this.registry[id];
     this.children.delete(id);
     this.restored.delete(id);
+    this.stdinClosed.delete(id);
     const timedOut = this.timedOut.delete(id);
     const runtimeSeconds = Math.max(0, Math.floor(Date.now() / 1000) - record.start_time);
     const finished: FinishedJob = { record, exitCode, signal, timedOut, runtimeSeconds };

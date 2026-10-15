@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -19,7 +19,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
   }
 }
 
-function harness(dir: string) {
+function harness(dir: string, settings: Record<string, unknown> = {}) {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
   const tools = new Map<string, ToolDefinition<TSchema, Details>>();
   const messages: Array<{ message: any; options: any }> = [];
@@ -41,7 +41,7 @@ function harness(dir: string) {
     on: (name: string, handler: any) => handlers.set(name, handler),
     registerTool: (definition: ToolDefinition<TSchema, Details>) => tools.set(definition.name, definition),
     registerCommand: (_name: string, definition: any) => { command = definition; },
-    getSettings: () => ({}),
+    getSettings: () => settings,
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
@@ -64,12 +64,13 @@ function harness(dir: string) {
   };
 }
 
-async function setup(t: TestContext, options: { corrupt?: boolean } = {}) {
+async function setup(t: TestContext, options: { corrupt?: boolean; configure?: (dir: string) => Promise<Record<string, unknown>> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "pi-jobs-ext-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   if (options.corrupt) await writeFile(join(dir, "registry.json"), "not json");
+  const settings = options.configure ? await options.configure(dir) : {};
   process.env.PI_JOBS_DIR = dir;
-  const h = harness(dir);
+  const h = harness(dir, settings);
   t.after(() => { h.emit("session_shutdown"); delete process.env.PI_JOBS_DIR; });
   await h.emit("session_start");
   return h;
@@ -139,4 +140,27 @@ test("a corrupt registry fails closed instead of overwriting durable state", asy
   const h = await setup(t, { corrupt: true });
   await assert.rejects(h.call("bash_async", { command: "echo hi" }), /unavailable/);
   assert.ok(h.notifications.some((note) => /failed to load/.test(note)));
+});
+
+test("jobs run under the shell resolved from settings.shellPath", async (t) => {
+  const h = await setup(t, {
+    configure: async (dir) => {
+      const shell = join(dir, "custom-shell.sh");
+      await writeFile(shell, "#!/bin/sh\necho CUSTOM_SHELL_MARKER\nexec /bin/sh \"$@\"\n", { mode: 0o755 });
+      return { shellPath: shell };
+    },
+  });
+  const started = await h.call("bash_async", { command: "echo done" });
+  await waitUntil(() => h.messages.length === 1);
+  const log = await readFile(started.details!.logPath, "utf8");
+  assert.match(log, /CUSTOM_SHELL_MARKER/);
+  assert.match(log, /done/);
+});
+
+test("an invalid shellPath warns and falls back to the default shell", async (t) => {
+  const h = await setup(t, { configure: async (dir) => ({ shellPath: join(dir, "missing-shell") }) });
+  assert.ok(h.notifications.some((note) => /ignoring shellPath/.test(note)));
+  const started = await h.call("bash_async", { command: "echo fellback" });
+  await waitUntil(() => h.messages.length === 1);
+  assert.match(await readFile(started.details!.logPath, "utf8"), /fellback/);
 });

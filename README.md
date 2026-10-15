@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.1.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.2.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -35,7 +35,7 @@ Each job gets a two-character ID (`00`–`zz`, 1,296 possible values) that is re
 | `bash_send` | `id`, `input` | Writes `input` plus a newline to the process stdin |
 | `bash_kill` | `id` | Sends `SIGINT` to the process group, falling back to `SIGKILL` after a five-second grace period |
 
-The tools run sequentially because they share the on-disk registry. Run each command through a shell as if it were a normal `bash` call.
+The tools run sequentially because they share the on-disk registry. Each command runs under the shell Pi resolves for the built-in bash tool, so it honours `settings.shellPath`; when that path is invalid the extension warns and uses the default shell.
 
 ## Completion steering
 

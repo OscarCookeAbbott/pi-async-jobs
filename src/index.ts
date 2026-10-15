@@ -1,8 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatCompletion, formatJobLine, formatStatus } from "./format.ts";
-import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobRecord } from "./jobs.ts";
+import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobRecord, type ShellCommand } from "./jobs.ts";
 
 const COMPLETION_TAIL_LINES = 20;
 const id = Type.String({ pattern: "^[0-9a-z]{2}$", description: "Two-character job ID" });
@@ -28,6 +28,22 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       return await tailFile(path, COMPLETION_TAIL_LINES);
     } catch {
       return "";
+    }
+  }
+
+  /** Use the same resolved shell as the built-in bash tool, honouring settings.shellPath. */
+  function resolveShell(ctx: ExtensionContext): ShellCommand {
+    try {
+      const config = getShellConfig(pi.getSettings().shellPath);
+      return { shell: config.shell, args: [...config.args], transport: config.commandTransport };
+    } catch (error) {
+      ctx.ui.notify(`Async jobs: ignoring shellPath (${error instanceof Error ? error.message : String(error)}); falling back to the default shell.`, "warning");
+      try {
+        const fallback = getShellConfig();
+        return { shell: fallback.shell, args: [...fallback.args], transport: fallback.commandTransport };
+      } catch {
+        return { shell: "sh", args: ["-c"] };
+      }
     }
   }
 
@@ -76,7 +92,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     ctxRef = ctx;
     manager?.dispose();
-    manager = new JobManager();
+    manager = new JobManager(undefined, { shell: resolveShell(ctx) });
     loadError = undefined;
     try {
       const { restored, reaped } = await manager.load();
