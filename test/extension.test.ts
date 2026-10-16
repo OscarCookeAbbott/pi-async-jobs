@@ -101,11 +101,11 @@ test("async call headers use the built-in shell style and show the effective tim
   const render = h.tools.get("bash_async")!.renderCall! as Function;
   for (const [timeout, suffix] of [[undefined, "timeout 60s"], [120, "timeout 120s"], [0, "no timeout"]] as const) {
     const text = render({ command: "echo hi", timeout }, theme, {}).render(200).join("\n").trimEnd();
-    assert.equal(text, `<toolTitle><bold>$ echo hi</bold></toolTitle><muted> [async] (${suffix})</muted>`);
+    assert.equal(text, `<toolTitle><bold>bash_async</bold></toolTitle><accent> $ echo hi</accent><muted> (${suffix})</muted>`);
   }
   for (const name of ["bash_check", "bash_send", "bash_kill"]) {
     const renderCall = h.tools.get(name)!.renderCall! as Function;
-    assert.equal(renderCall({ id: "ab" }, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><muted> ab</muted>`);
+    assert.equal(renderCall({ id: "ab" }, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><accent> [ab]</accent>`);
     assert.equal(renderCall({}, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><muted> ...</muted>`);
   }
   const styles: string[] = [];
@@ -125,13 +125,28 @@ test("completion notifications retain themed backgrounds and configured padding"
     const theme = {
       fg: (color: string, text: string) => { foregrounds.push(color); return text; },
       bg: (color: string, text: string) => { backgrounds.push(color); return text; },
+      bold: (text: string) => { assert.equal(text, "Job [ab] succeeded."); return text; },
     };
     const lines: string[] = h.renderers.get("async-jobs-completion")!({ content: "Job [ab] succeeded." }, { expanded: false, outputPad }, theme).render(80);
     assert.ok(lines.includes(" ".repeat(outputPad) + "Job [ab] succeeded." + " ".repeat(80 - outputPad - "Job [ab] succeeded.".length)));
     assert.ok(backgrounds.length > 0 && backgrounds.every((color) => color === "customMessageBg"));
-    assert.deepEqual(foregrounds, ["customMessageText"]);
+    assert.deepEqual(foregrounds, ["toolTitle"]);
     assert.ok(lines.every((line) => visibleWidth(line) <= 80));
   }
+});
+
+test("batched notifications emphasise status headers without styling log text as headers", () => {
+  const h = harness("/unused");
+  const content = "2 jobs finished (1 unsuccessful, 0 unknown).\nJob [ab] succeeded.\nJob [cd] failed.\nOutput [ab]:\nJob [zz] succeeded.";
+  const headings: string[] = [];
+  const theme = {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => { headings.push(text); return text; },
+  };
+  const rendered = h.renderers.get("async-jobs-completion")!({ content }, { expanded: false, outputPad: 0 }, theme).render(200);
+  assert.equal(rendered.map((line: string) => line.trim()).filter(Boolean).join("\n"), content);
+  assert.deepEqual(headings, content.split("\n").slice(0, 3));
 });
 
 test("a finished job produces one merged completion frame and triggers a turn when idle", async (t) => {
@@ -231,7 +246,7 @@ test("large output stays bounded while expanded UI retains command and process m
   const command = "node -e \"process.stdout.write('x'.repeat(20000))\"";
   const started = await h.call("bash_async", { command });
   const render = h.tools.get("bash_async")!.renderResult! as Function;
-  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
+  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
   const expanded = render(started, { expanded: true }, theme, {}).render(200).join("\n");
   assert.match(expanded, /PID.*PGID/);
   assert.ok(expanded.includes(started.details!.logPath));

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+- Show the actual bash_async tool name in bold, accent shell commands and job IDs, and retain muted timeout/placeholder styling without a redundant async badge.
+- Use bold, high-contrast notification headings, including batched statuses, while leaving subsequent log text in the body style.
+
 ## 0.3.1
 
 - Lead tool descriptions and prompt summaries with non-blocking execution and automatic notifications; reserve bash for quick commands in agent guidance.

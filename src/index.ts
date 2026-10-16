@@ -116,7 +116,12 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       ? message.details.jobs.map(({ completion, tail }) => `${formatMetadata(jobMetadata(completion.id, completion.record))}\n${formatStatus({ ...completion, running: false, tail })}`).join("\n\n")
       : content;
     const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
-    box.addChild(new Text(theme.fg("customMessageText", uiText(text)), 0, 0));
+    let heading = true;
+    const styled = uiText(text).split("\n").map((line, index) => {
+      if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
+      return heading ? theme.fg("toolTitle", theme.bold(line)) : theme.fg("customMessageText", line);
+    }).join("\n");
+    box.addChild(new Text(styled, 0, 0));
     return box;
   });
 
@@ -180,7 +185,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     renderCall(args, theme) {
       const timeout = args.timeout ?? DEFAULT_TIMEOUT;
       const suffix = timeout === 0 ? "no timeout" : `timeout ${timeout}s`;
-      return new Text(theme.fg("toolTitle", theme.bold(`$ ${args.command ?? "..."}`)) + theme.fg("muted", ` [async] (${suffix})`), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_async")) + theme.fg("accent", ` $ ${args.command ?? "..."}`) + theme.fg("muted", ` (${suffix})`), 0, 0);
     },
     renderResult,
   });
@@ -204,7 +209,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("bash_check")) + theme.fg("muted", ` ${args.id ?? "..."}`), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_check")) + theme.fg(args.id ? "accent" : "muted", args.id ? ` [${args.id}]` : " ..."), 0, 0);
     },
     renderResult,
   });
@@ -228,7 +233,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("bash_send")) + theme.fg("muted", ` ${args.id ?? "..."}`), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_send")) + theme.fg(args.id ? "accent" : "muted", args.id ? ` [${args.id}]` : " ..."), 0, 0);
     },
     renderResult,
   });
@@ -250,7 +255,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("bash_kill")) + theme.fg("muted", ` ${args.id ?? "..."}`), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_kill")) + theme.fg(args.id ? "accent" : "muted", args.id ? ` [${args.id}]` : " ..."), 0, 0);
     },
     renderResult,
   });
