@@ -1,3 +1,4 @@
+import { truncateTail } from "@earendil-works/pi-coding-agent";
 import { randomBytes, createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createWriteStream, type WriteStream } from "node:fs";
@@ -8,6 +9,7 @@ import { join } from "node:path";
 export const DEFAULT_TIMEOUT = 60;
 export const MAX_LOG_BYTES = 10 * 1024 * 1024;
 export const TAIL_LINES = 50;
+export const MAX_TAIL_BYTES = 4096;
 export const ID_COUNT = 36 * 36;
 export const FINISHED_CACHE_SIZE = 32;
 
@@ -41,14 +43,15 @@ export interface FinishedJob {
   runtimeSeconds: number;
 }
 
-export interface JobStatus {
-  id: string;
-  record: JobRecord;
+export interface LogTail {
+  text: string;
+  truncated: boolean;
+  error?: string;
+}
+
+export interface JobStatus extends JobCompletion {
   running: boolean;
-  exitCode: number | null;
-  timedOut: boolean;
-  runtimeSeconds: number;
-  tail: string;
+  tail: LogTail;
 }
 
 export interface ShellCommand {
@@ -114,29 +117,27 @@ export function parseRegistry(value: unknown): Registry {
   return registry;
 }
 
-/** Reads the last `lines` lines of a file without loading it whole. */
-export async function tailFile(path: string, lines: number): Promise<string> {
-  if (lines <= 0) return "";
-  const handle = await open(path, "r");
+/** Reads only a bounded suffix, even when the log contains a single enormous line. */
+export async function tailFile(path: string, lines: number): Promise<LogTail> {
+  if (lines <= 0) return { text: "", truncated: false };
   try {
-    const { size } = await handle.stat();
-    const chunks: Buffer[] = [];
-    let position = size;
-    let newlines = 0;
-    const chunkSize = 16 * 1024;
-    while (position > 0 && newlines <= lines) {
-      const length = Math.min(chunkSize, position);
-      position -= length;
-      const buffer = Buffer.allocUnsafe(length);
-      await handle.read(buffer, 0, length, position);
-      chunks.unshift(buffer);
-      for (const byte of buffer) if (byte === 0x0a) newlines++;
+    const handle = await open(path, "r");
+    try {
+      const { size } = await handle.stat();
+      const position = Math.max(0, size - MAX_TAIL_BYTES);
+      const buffer = Buffer.allocUnsafe(Math.min(size, MAX_TAIL_BYTES));
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      let start = 0;
+      if (position > 0) while (start < bytesRead && (buffer[start] & 0xc0) === 0x80) start++;
+      const parts = buffer.subarray(start, bytesRead).toString("utf8").split("\n");
+      if (parts.at(-1) === "") parts.pop();
+      const shown = truncateTail(parts.slice(-lines).join("\n"), { maxLines: lines, maxBytes: MAX_TAIL_BYTES });
+      return { text: shown.content, truncated: shown.truncated || position > 0 || parts.length > lines };
+    } finally {
+      await handle.close();
     }
-    const parts = Buffer.concat(chunks).toString("utf8").split("\n");
-    if (parts.at(-1) === "") parts.pop();
-    return parts.slice(-lines).join("\n");
-  } finally {
-    await handle.close();
+  } catch (error) {
+    return { text: "", truncated: false, error: (error as NodeJS.ErrnoException).code ?? "read failed" };
   }
 }
 
@@ -266,9 +267,10 @@ export class JobManager {
         record: active,
         running,
         exitCode: null,
+        signal: null,
         timedOut: this.timedOut.has(id),
         runtimeSeconds: Math.max(0, Math.floor(Date.now() / 1000) - active.start_time),
-        tail: await this.readTail(active.log_path, tailLines),
+        tail: await tailFile(active.log_path, tailLines),
       };
     }
     const finished = this.finished.get(id);
@@ -278,9 +280,10 @@ export class JobManager {
       record: finished.record,
       running: false,
       exitCode: finished.exitCode,
+      signal: finished.signal,
       timedOut: finished.timedOut,
       runtimeSeconds: finished.runtimeSeconds,
-      tail: await this.readTail(finished.record.log_path, tailLines),
+      tail: await tailFile(finished.record.log_path, tailLines),
     };
   }
 
@@ -313,14 +316,6 @@ export class JobManager {
     for (const timer of this.timeoutTimers.values()) clearTimeout(timer);
     this.timeoutTimers.clear();
     this.listeners.clear();
-  }
-
-  private async readTail(path: string, lines: number): Promise<string> {
-    try {
-      return await tailFile(path, lines);
-    } catch {
-      return "";
-    }
   }
 
   private attachLog(id: string, child: ChildProcess): void {
@@ -404,17 +399,20 @@ export class JobManager {
       const oldest = this.finished.keys().next().value;
       if (oldest !== undefined) this.finished.delete(oldest);
     }
-    void this.save().catch(() => {});
-    for (const waiter of this.exitWaiters.get(id) ?? []) waiter();
+    const waiters = this.exitWaiters.get(id) ?? [];
     this.exitWaiters.delete(id);
     const completion: JobCompletion = { id, record, exitCode, signal, timedOut, runtimeSeconds };
-    for (const listener of this.listeners) {
-      try {
-        listener(completion);
-      } catch {
-        // A listener must not break completion handling.
+    // Completion must not race its registry update or a caller's cleanup of the jobs directory.
+    void this.save().catch(() => {}).then(() => {
+      for (const waiter of waiters) waiter();
+      for (const listener of this.listeners) {
+        try {
+          listener(completion);
+        } catch {
+          // A listener must not break completion handling.
+        }
       }
-    }
+    });
   }
 
   private waitForExit(id: string, timeoutMs: number): Promise<boolean> {

@@ -1,12 +1,22 @@
-import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getShellConfig, truncateHead, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatCompletion, formatJobLine, formatStatus } from "./format.ts";
-import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobRecord, type ShellCommand } from "./jobs.ts";
+import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, type CompletionFeedback, type JobMetadata } from "./format.ts";
+import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type ShellCommand } from "./jobs.ts";
 
 const COMPLETION_TAIL_LINES = 20;
 const id = Type.String({ pattern: "^[0-9a-z]{2}$", description: "Two-character job ID" });
-const details = (id: string, record: JobRecord) => ({ id, pid: record.pid, pgid: record.pgid, command: record.command, logPath: record.log_path });
+const uiText = (text: string): string => {
+  const shown = truncateHead(text, { maxLines: 500, maxBytes: 30000 });
+  return shown.content + (shown.truncated ? "\n[Details truncated; inspect the log file for full output.]" : "");
+};
+const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { expanded }, theme, context) => {
+  const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
+  const metadata = result.details as JobMetadata | undefined;
+  const lines = [theme.fg(context?.isError ? "error" : "toolOutput", uiText(text))];
+  if (expanded && typeof metadata?.command === "string") lines.push(theme.fg("muted", uiText(formatMetadata(metadata))));
+  return new Text(lines.join("\n"), 0, 0);
+};
 
 export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let manager: JobManager | undefined;
@@ -14,6 +24,8 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let ctxRef: ExtensionContext | undefined;
   let pending: JobCompletion[] = [];
   let flushTimer: NodeJS.Timeout | undefined;
+  let refreshTimer: NodeJS.Timeout | undefined;
+  let requestWidgetRender: (() => void) | undefined;
   let removeExitHook: (() => void) | undefined;
   const debounceMs = Number(process.env.PI_JOBS_DEBOUNCE_MS ?? 200);
 
@@ -21,14 +33,6 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     if (loadError) throw new Error(`Async jobs registry is unavailable: ${loadError}`);
     if (!manager) throw new Error("Async jobs are not ready yet.");
     return manager;
-  }
-
-  async function logTail(path: string): Promise<string> {
-    try {
-      return await tailFile(path, COMPLETION_TAIL_LINES);
-    } catch {
-      return "";
-    }
   }
 
   /** Use the same resolved shell as the built-in bash tool, honouring settings.shellPath. */
@@ -47,28 +51,45 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function stopWidgetRefresh(): void {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = undefined;
+    requestWidgetRender = undefined;
+  }
+
   function updateWidget(): void {
     const ctx = ctxRef;
-    if (!ctx || ctx.mode !== "tui") return;
+    if (!ctx || ctx.mode !== "tui") {
+      stopWidgetRefresh();
+      return;
+    }
     const jobs = manager?.active() ?? [];
     if (!jobs.length) {
+      stopWidgetRefresh();
       ctx.ui.setWidget("async-jobs", undefined);
       return;
     }
-    ctx.ui.setWidget("async-jobs", (_tui, theme) => ({
-      render(width: number): string[] {
-        const heading = truncateToWidth(theme.fg("muted", `Jobs · ${jobs.length} running · /jobs`), width);
-        const now = Math.floor(Date.now() / 1000);
-        return [
-          heading,
-          ...jobs.slice(0, 6).map(({ id, record, running }) =>
-            truncateToWidth(theme.fg(running ? "accent" : "warning", formatJobLine(id, record.command, running, Math.max(0, now - record.start_time))), width),
-          ),
-          ...(jobs.length > 6 ? [truncateToWidth(theme.fg("dim", `+${jobs.length - 6} more`), width)] : []),
-        ];
-      },
-      invalidate() {},
-    }));
+    ctx.ui.setWidget("async-jobs", (tui, theme) => {
+      requestWidgetRender = () => tui.requestRender();
+      return {
+        render(width: number): string[] {
+          const heading = truncateToWidth(theme.fg("muted", `Jobs · ${jobs.length} running`), width);
+          const now = Math.floor(Date.now() / 1000);
+          return [
+            heading,
+            ...jobs.slice(0, 6).map(({ id, record, running }) =>
+              truncateToWidth(theme.fg(running ? "accent" : "warning", formatJobLine(id, record.command, running, Math.max(0, now - record.start_time))), width),
+            ),
+            ...(jobs.length > 6 ? [truncateToWidth(theme.fg("dim", `+${jobs.length - 6} more`), width)] : []),
+          ];
+        },
+        invalidate() {},
+      };
+    });
+    if (!refreshTimer) {
+      refreshTimer = setInterval(() => requestWidgetRender?.(), 1000);
+      refreshTimer.unref?.();
+    }
   }
 
   async function flush(): Promise<void> {
@@ -76,10 +97,10 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     const batch = pending;
     pending = [];
     if (!batch.length) return;
-    const rendered = await Promise.all(batch.map(async (completion) => formatCompletion(completion, await logTail(completion.record.log_path), COMPLETION_TAIL_LINES)));
-    const content = rendered.join("\n\n");
+    const jobs = await Promise.all(batch.map(async (completion) => ({ completion, tail: await tailFile(completion.record.log_path, COMPLETION_TAIL_LINES) })));
+    const content = formatCompletions(jobs);
     // Steer an active run; start a turn when the agent is idle. Either way the batch is one frame.
-    pi.sendMessage({ customType: "async-jobs-completion", content, display: true }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
+    pi.sendMessage({ customType: "async-jobs-completion", content, display: true, details: { jobs } }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
     updateWidget();
   }
 
@@ -89,7 +110,16 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     updateWidget();
   }
 
+  pi.registerMessageRenderer<{ jobs: CompletionFeedback[] }>("async-jobs-completion", (message, { expanded }, theme) => {
+    const content = typeof message.content === "string" ? message.content : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
+    const text = expanded && message.details?.jobs
+      ? message.details.jobs.map(({ completion, tail }) => `${formatMetadata(jobMetadata(completion.id, completion.record))}\n${formatStatus({ ...completion, running: false, tail })}`).join("\n\n")
+      : content;
+    return new Text(theme.fg("toolOutput", uiText(text)), 0, 0);
+  });
+
   pi.on("session_start", async (_event, ctx) => {
+    stopWidgetRefresh();
     ctxRef = ctx;
     manager?.dispose();
     manager = new JobManager(undefined, { shell: resolveShell(ctx) });
@@ -110,6 +140,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    stopWidgetRefresh();
     manager?.killAllSync();
     removeExitHook?.();
     removeExitHook = undefined;
@@ -140,17 +171,16 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd);
       updateWidget();
       return {
-        content: [{ type: "text", text: `Job ${jobId} started (PID ${record.pid}). Logging to ${record.log_path}` }],
-        details: details(jobId, record),
+        content: [{ type: "text", text: `Job [${jobId}] started.` }],
+        details: jobMetadata(jobId, record),
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", "bash_async ") + theme.fg("muted", args.command), 0, 0);
+      const timeout = args.timeout ?? DEFAULT_TIMEOUT;
+      const suffix = timeout === 0 ? "no timeout" : `timeout ${timeout}s`;
+      return new Text(theme.fg("toolTitle", theme.bold(`$ ${args.command ?? "..."}`)) + theme.fg("muted", ` [async] (${suffix})`), 0, 0);
     },
-    renderResult(result, _options, theme) {
-      const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
-      return new Text(theme.fg("muted", text), 0, 0);
-    },
+    renderResult,
   });
 
   pi.registerTool({
@@ -168,16 +198,13 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       const status = await requireManager().check(params.id, params.tail_lines ?? TAIL_LINES);
       return {
         content: [{ type: "text", text: formatStatus(status) }],
-        details: details(params.id, status.record),
+        details: { ...jobMetadata(params.id, status.record), status },
       };
     },
     renderCall(args, theme) {
       return new Text(theme.fg("toolTitle", "bash_check ") + theme.fg("muted", args.id), 0, 0);
     },
-    renderResult(result, _options, theme) {
-      const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
-      return new Text(theme.fg("muted", text), 0, 0);
-    },
+    renderResult,
   });
 
   pi.registerTool({
@@ -194,17 +221,14 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     async execute(_toolCallId, params) {
       requireManager().send(params.id, params.input);
       return {
-        content: [{ type: "text", text: `Input sent to Job ${params.id}.` }],
+        content: [{ type: "text", text: `Input sent to job [${params.id}].` }],
         details: { id: params.id },
       };
     },
     renderCall(args, theme) {
       return new Text(theme.fg("toolTitle", "bash_send ") + theme.fg("muted", args.id), 0, 0);
     },
-    renderResult(result, _options, theme) {
-      const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
-      return new Text(theme.fg("muted", text), 0, 0);
-    },
+    renderResult,
   });
 
   pi.registerTool({
@@ -219,17 +243,14 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       const record = await requireManager().kill(params.id);
       updateWidget();
       return {
-        content: [{ type: "text", text: `Job ${params.id} (PGID ${record.pgid}) terminated.` }],
-        details: details(params.id, record),
+        content: [{ type: "text", text: `Job [${params.id}] terminated.` }],
+        details: jobMetadata(params.id, record),
       };
     },
     renderCall(args, theme) {
       return new Text(theme.fg("toolTitle", "bash_kill ") + theme.fg("muted", args.id), 0, 0);
     },
-    renderResult(result, _options, theme) {
-      const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
-      return new Text(theme.fg("muted", text), 0, 0);
-    },
+    renderResult,
   });
 
   pi.registerCommand("jobs", {

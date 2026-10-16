@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Use compact job acknowledgements and bounded command labels; retain command output and distinguish failed, signalled, timed-out and unknown exits.
+- Bound log-tail reads and UTF-8 output to 4 KiB and merged model notifications to 16 KiB, with explicit truncation, log locations and unreadable-log warnings.
+- Preserve full commands/process metadata in expanded TUI results and completion messages; use built-in-style shell headers, effective timeout suffixes and standard output/error colours.
+- Refresh concise running-job clocks once per second through TUI redraw requests, with durations before long command labels and no model messages or widget rebuilds.
+- Keep widget rows single-line and strip terminal control sequences to prevent command text corrupting editor layout; remove the redundant `/jobs` header hint.
+- Finish registry persistence before notifying completion listeners and exit waiters, preventing stale-registry observations and cleanup races.
+
 ## 0.2.0
 
 - Jobs run under the shell Pi resolves for the built-in bash tool, honouring `shellPath`. An invalid path warns and falls back to the default shell.

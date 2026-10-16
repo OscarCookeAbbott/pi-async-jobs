@@ -44,9 +44,34 @@ test("tailFile returns the last lines without loading the whole file", async (t)
   const dir = await workspace(t);
   const path = join(dir, "log.txt");
   await writeFile(path, ["one", "two", "three", "four"].join("\n"));
-  assert.equal(await tailFile(path, 2), "three\nfour");
-  assert.equal(await tailFile(path, 0), "");
-  assert.equal(await tailFile(path, 10), "one\ntwo\nthree\nfour");
+  assert.deepEqual(await tailFile(path, 2), { text: "three\nfour", truncated: true });
+  assert.deepEqual(await tailFile(path, 0), { text: "", truncated: false });
+  assert.deepEqual(await tailFile(path, 10), { text: "one\ntwo\nthree\nfour", truncated: false });
+});
+
+test("long single-line tails are byte bounded", async (t) => {
+  const dir = await workspace(t);
+  const path = join(dir, "long.log");
+  await writeFile(path, "x".repeat(1024 * 1024));
+  const tail = await tailFile(path, 20);
+  assert.ok(Buffer.byteLength(tail.text) <= 4096);
+  assert.equal(tail.truncated, true);
+});
+
+test("tail byte limits preserve Unicode and distinguish unreadable logs from silence", async (t) => {
+  const dir = await workspace(t);
+  const path = join(dir, "log.txt");
+  await writeFile(path, "💜".repeat(2000) + "Z");
+  const unicode = await tailFile(path, 20);
+  assert.ok(Buffer.byteLength(unicode.text) <= 4096);
+  assert.equal(unicode.truncated, true);
+  assert.ok(unicode.text.endsWith("Z"));
+  assert.ok(!unicode.text.includes("\ufffd"));
+  await writeFile(path, Buffer.alloc(8192, 0xff));
+  assert.ok(Buffer.byteLength((await tailFile(path, 20)).text) <= 4096);
+  await writeFile(path, "");
+  assert.deepEqual(await tailFile(path, 20), { text: "", truncated: false });
+  assert.equal((await tailFile(join(dir, "missing"), 20)).error, "ENOENT");
 });
 
 test("a job streams to disk and reports its exit through a completion event", async (t) => {
@@ -60,11 +85,12 @@ test("a job streams to disk and reports its exit through a completion event", as
   assert.equal(completion.id, id);
   assert.equal(completion.exitCode, 0);
   assert.equal(completion.timedOut, false);
+  assert.deepEqual(JSON.parse(await readFile(manager.registryPath, "utf8")), {});
   assert.match(await readFile(record.log_path, "utf8"), /hello\nworld/);
   const status = await manager.check(id, 10);
   assert.equal(status.running, false);
   assert.equal(status.exitCode, 0);
-  assert.equal(status.tail, "hello\nworld");
+  assert.equal(status.tail.text, "hello\nworld");
 });
 
 test("running jobs accept stdin and report status with a tail", async (t) => {
@@ -74,12 +100,12 @@ test("running jobs accept stdin and report status with a tail", async (t) => {
   const { id } = await manager.start("cat");
   manager.send(id, "ping");
   let status = await manager.check(id, 5);
-  for (let attempt = 0; attempt < 100 && !status.tail.includes("ping"); attempt++) {
+  for (let attempt = 0; attempt < 100 && !status.tail.text.includes("ping"); attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 20));
     status = await manager.check(id, 5);
   }
   assert.equal(status.running, true);
-  assert.match(status.tail, /ping/);
+  assert.match(status.tail.text, /ping/);
   const record = await manager.kill(id);
   assert.equal(record.pgid, record.pid);
   assert.equal((await manager.check(id)).running, false);

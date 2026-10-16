@@ -23,17 +23,20 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
   const tools = new Map<string, ToolDefinition<TSchema, Details>>();
   const messages: Array<{ message: any; options: any }> = [];
+  const renderers = new Map<string, Function>();
   const notifications: string[] = [];
   const widgets = new Map<string, any>();
   let command: any;
   let idle = true;
+  let renderRequests = 0;
+  let widgetUpdates = 0;
   const ctx = {
     mode: "tui",
     cwd: dir,
     isIdle: () => idle,
     sessionManager: { getBranch: () => [] },
     ui: {
-      setWidget: (key: string, content: unknown) => widgets.set(key, content),
+      setWidget: (key: string, content: unknown) => { widgetUpdates++; widgets.set(key, content); },
       notify: (text: string) => notifications.push(text),
     },
   } as unknown as ExtensionContext;
@@ -41,13 +44,16 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     on: (name: string, handler: any) => handlers.set(name, handler),
     registerTool: (definition: ToolDefinition<TSchema, Details>) => tools.set(definition.name, definition),
     registerCommand: (_name: string, definition: any) => { command = definition; },
+    registerMessageRenderer: (name: string, renderer: Function) => renderers.set(name, renderer),
     getSettings: () => settings,
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
   return {
-    dir, tools, messages, notifications, widgets, ctx, emit,
+    dir, tools, messages, renderers, notifications, widgets, ctx, emit,
     get command() { return command; },
+    get renderRequests() { return renderRequests; },
+    get widgetUpdates() { return widgetUpdates; },
     setIdle(value: boolean) { idle = value; },
     async call(name: string, params: JsonObject) {
       const tool = tools.get(name)!;
@@ -59,7 +65,7 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     },
     widgetLines(width = 80): string[] {
       const factory = widgets.get("async-jobs");
-      return factory ? factory({}, { fg: (_color: string, text: string) => text }).render(width) : [];
+      return factory ? factory({ requestRender: () => { renderRequests++; } }, { fg: (_color: string, text: string) => text }).render(width) : [];
     },
   };
 }
@@ -85,6 +91,23 @@ test("registers the four background tools and validates their arguments", async 
   await assert.rejects(h.call("bash_check", { id: "zz" }), /Unknown job/);
 });
 
+test("async call headers use the built-in shell style and show the effective timeout", () => {
+  const h = harness("/unused");
+  const theme = { fg: (color: string, text: string) => `<${color}>${text}</${color}>`, bold: (text: string) => `<bold>${text}</bold>` };
+  const render = h.tools.get("bash_async")!.renderCall! as Function;
+  for (const [timeout, suffix] of [[undefined, "timeout 60s"], [120, "timeout 120s"], [0, "no timeout"]] as const) {
+    const text = render({ command: "echo hi", timeout }, theme, {}).render(200).join("\n").trimEnd();
+    assert.equal(text, `<toolTitle><bold>$ echo hi</bold></toolTitle><muted> [async] (${suffix})</muted>`);
+  }
+  const styles: string[] = [];
+  const resultTheme = { fg: (color: string, text: string) => { styles.push(color); return text; } };
+  const result = { content: [{ type: "text", text: "output" }], details: {} };
+  const renderResult = h.tools.get("bash_async")!.renderResult! as Function;
+  renderResult(result, { expanded: false }, resultTheme, { isError: false });
+  renderResult(result, { expanded: false }, resultTheme, { isError: true });
+  assert.deepEqual(styles, ["toolOutput", "error"]);
+});
+
 test("a finished job produces one merged completion frame and triggers a turn when idle", async (t) => {
   const h = await setup(t);
   h.setIdle(true);
@@ -93,7 +116,9 @@ test("a finished job produces one merged completion frame and triggers a turn wh
   await waitUntil(() => h.messages.length === 1);
   assert.equal(h.messages[0].message.customType, "async-jobs-completion");
   assert.equal(h.messages[0].options.triggerTurn, true);
-  assert.match(h.messages[0].message.content, /\[Background Job [0-9a-z]{2} finished with exit code 0/);
+  assert.match(h.messages[0].message.content, /Job \[[0-9a-z]{2}\] succeeded/);
+  assert.equal(h.text(started), `Job [${id}] started.`);
+  assert.doesNotMatch(h.messages[0].message.content, /PID|PGID|Log[s]?:/);
   assert.match(h.messages[0].message.content, /printf/);
   assert.match(h.messages[0].message.content, /hi/);
   assert.ok(h.messages[0].message.content.includes(id));
@@ -132,8 +157,71 @@ test("running jobs appear in the widget and can be inspected, fed, and killed", 
   assert.match(tail, /ping/);
   await h.command.handler("", h.ctx);
   assert.ok(h.notifications.at(-1)!.includes(id));
-  assert.match(h.text(await h.call("bash_kill", { id })), new RegExp(`Job ${id} \\(PGID \\d+\\) terminated\\.`));
+  assert.equal(h.text(await h.call("bash_kill", { id })), `Job [${id}] terminated.`);
   assert.deepEqual(h.widgetLines(), []);
+});
+
+test("running durations redraw once per second without rebuilding widgets or messaging the agent", async (t) => {
+  const h = await setup(t);
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+  const started = await h.call("bash_async", { command: "cat\n# " + "💜".repeat(80) + "\t\r", timeout: 0 });
+  const { id } = started.details!;
+  const factory = h.widgets.get("async-jobs");
+  assert.match(h.widgetLines(24)[1], /0s/);
+  const updates = h.widgetUpdates;
+  t.mock.timers.tick(999);
+  assert.equal(h.renderRequests, 0);
+  t.mock.timers.tick(1);
+  assert.equal(h.renderRequests, 1);
+  assert.match(h.widgetLines(24)[1], /1s/);
+  t.mock.timers.tick(59000);
+  assert.match(h.widgetLines(24)[1], /1:00/);
+  assert.equal(h.widgets.get("async-jobs"), factory);
+  assert.equal(h.widgetUpdates, updates);
+  assert.equal(h.messages.length, 0);
+  for (const width of [1, 12, 24, 80]) {
+    assert.ok(h.widgetLines(width).every((line) => !/[\r\n\t]/.test(line) && visibleWidth(line) <= width));
+  }
+  await h.call("bash_kill", { id });
+  const requests = h.renderRequests;
+  t.mock.timers.tick(1000);
+  assert.equal(h.renderRequests, requests);
+  assert.deepEqual(h.widgetLines(), []);
+});
+
+test("non-interactive jobs do not start UI refreshes", async (t) => {
+  const h = await setup(t);
+  Reflect.set(h.ctx, "mode", "print");
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const started = await h.call("bash_async", { command: "cat", timeout: 0 });
+  t.mock.timers.tick(2000);
+  assert.equal(h.renderRequests, 0);
+  assert.deepEqual(h.widgetLines(), []);
+  await h.call("bash_kill", { id: started.details!.id });
+});
+
+test("large output stays bounded while expanded UI retains command and process metadata", async (t) => {
+  const h = await setup(t);
+  const command = "node -e \"process.stdout.write('x'.repeat(20000))\"";
+  const started = await h.call("bash_async", { command });
+  const render = h.tools.get("bash_async")!.renderResult! as Function;
+  const theme = { fg: (_color: string, text: string) => text };
+  const expanded = render(started, { expanded: true }, theme, {}).render(200).join("\n");
+  assert.match(expanded, /PID.*PGID/);
+  assert.ok(expanded.includes(started.details!.logPath));
+  await waitUntil(() => h.messages.length === 1);
+  const { message } = h.messages[0];
+  assert.ok(Buffer.byteLength(message.content) <= 16384);
+  assert.match(message.content, /truncated/);
+  assert.match(message.content, /Logs:/);
+  assert.equal(message.details.jobs[0].completion.record.command, command);
+  const messageUI = h.renderers.get("async-jobs-completion")!(message, { expanded: true }, theme).render(200).join("\n");
+  assert.ok(messageUI.includes(started.details!.logPath));
+  assert.ok(messageUI.includes(command));
+  for (const tool of h.tools.values()) {
+    const refusal = { content: [{ type: "text", text: "Unknown job zz." }], details: {} };
+    assert.equal((tool.renderResult! as Function)(refusal, { expanded: true }, theme, {}).render(200).join("\n").trimEnd(), "Unknown job zz.");
+  }
 });
 
 test("a corrupt registry fails closed instead of overwriting durable state", async (t) => {

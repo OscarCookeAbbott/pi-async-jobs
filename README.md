@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.2.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.3.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -30,7 +30,7 @@ Each job gets a two-character ID (`00`–`zz`, 1,296 possible values) that is re
 
 | Tool | Arguments | Behaviour |
 | --- | --- | --- |
-| `bash_async` | `command`; optional `timeout` (seconds, default 60, `0` for none) | Spawns a detached process group, writes the registry entry, and starts the log stream. Returns `Job <id> started (PID <pid>). Logging to <log_path>` |
+| `bash_async` | `command`; optional `timeout` (seconds, default 60, `0` for none) | Spawns a detached process group, writes the registry entry, and starts the log stream. Returns `Job [<id>] started.`; PID, process group, full command and log path remain in expanded TUI details |
 | `bash_check` | `id`; optional `tail_lines` (default 50) | Reports `running` or the exit code and returns the last log lines |
 | `bash_send` | `id`, `input` | Writes `input` plus a newline to the process stdin |
 | `bash_kill` | `id` | Sends `SIGINT` to the process group, falling back to `SIGKILL` after a five-second grace period |
@@ -42,18 +42,23 @@ The tools run sequentially because they share the on-disk registry. Each command
 When a job finishes, the extension builds one frame per completion:
 
 ```text
-[Background Job a1 finished with exit code 0 (runtime: 14s)]
-Command: npm test
-Log file: /tmp/pi_jobs/a1.log
-Tail (last 20 lines):
-...
+Job [a1] succeeded (14s): npm test
+Output [a1]:
+17 tests passed.
 ```
+
+Command labels are flattened and limited to 120 Unicode code points. Completion tails contain up to 20 lines and 4 KiB; `bash_check` defaults to 50 lines with the same byte limit. Successful command output is retained because it may be the requested result. Nonzero exits, signals, timeouts and unknown exit codes are distinguished. Unreadable logs produce an explicit warning rather than looking like silent output.
+
+Merged model-facing frames are limited to 16 KiB, with status summaries ahead of log output. Very large frames explicitly flag omitted details and report unsuccessful/unknown totals. Failures, unavailable logs and truncation include log locations; `<id>.log` means the named job's ID. Full commands and process metadata remain available in expanded TUI results and completion messages. Expanding the TUI does not expand model context.
 
 Completions that arrive during an active run or within the debounce window are collapsed into a single merged message, so several short jobs do not trigger a burst of model calls. The frame is delivered with `triggerTurn` when the agent is idle and as a steer message when a run is active.
 
 ## Widget and command
 
-- The widget lists running jobs with their IDs, commands, and runtimes. It is hidden when no jobs are running.
+Async calls use the built-in shell presentation: a bold `$ command` header, an `[async]` label, and a muted effective timeout suffix, e.g. `(timeout 60s)` or `(no timeout)`. Output uses the standard tool-output colour; invocation errors use the error colour. This styling is TUI-only.
+
+- The widget shows `▶ [ab] 14s command`, with compact clocks (`14s`, `1:02`, `1:02:03`) ahead of command labels so long commands cannot hide the duration. It requests a redraw once per second while jobs run, without rebuilding the widget or sending model messages. Refreshes stop when the list empties or the session shuts down/restarts, and never start in non-interactive modes.
+- Command labels are single-line and stripped of terminal control sequences; each row fits the available terminal width. Multiline commands therefore cannot add unaccounted rows over the editor. The widget is hidden when no jobs are running.
 - `/jobs` lists running jobs.
 - `/jobs kill <id>` terminates one job.
 - `/jobs kill-all` terminates every running job.
@@ -69,6 +74,7 @@ Set `PI_JOBS_DIR` to change the directory (used by the test suite). Set `PI_JOBS
 ## Safety
 
 - **Process groups:** Jobs are started detached, so each PID is its own process-group leader. Timeouts, `bash_kill`, and shutdown cleanup signal the whole group (`-pgid`), which stops child processes such as node workers or test runners.
+- **Model output cap:** Tail reads inspect at most 4 KiB, even for enormous single lines; UTF-8 text and merged notifications have additional byte bounds. Truncation is explicit and logs remain inspectable.
 - **Log cap:** Each log file is capped at 10 MB. Writes stop at the cap and a truncation marker is appended, so a runaway output loop cannot fill the disk.
 - **Shutdown cleanup:** A synchronous process-exit hook and the session-shutdown handler send `SIGKILL` to every active process group.
 
