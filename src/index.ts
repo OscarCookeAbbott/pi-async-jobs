@@ -1,5 +1,5 @@
 import { getShellConfig, truncateHead, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, type CompletionFeedback, type JobMetadata } from "./format.ts";
 import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type ShellCommand } from "./jobs.ts";
@@ -110,12 +110,14 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     updateWidget();
   }
 
-  pi.registerMessageRenderer<{ jobs: CompletionFeedback[] }>("async-jobs-completion", (message, { expanded }, theme) => {
+  pi.registerMessageRenderer<{ jobs: CompletionFeedback[] }>("async-jobs-completion", (message, { expanded, outputPad }, theme) => {
     const content = typeof message.content === "string" ? message.content : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
     const text = expanded && message.details?.jobs
       ? message.details.jobs.map(({ completion, tail }) => `${formatMetadata(jobMetadata(completion.id, completion.record))}\n${formatStatus({ ...completion, running: false, tail })}`).join("\n\n")
       : content;
-    return new Text(theme.fg("toolOutput", uiText(text)), 0, 0);
+    const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
+    box.addChild(new Text(theme.fg("customMessageText", uiText(text)), 0, 0));
+    return box;
   });
 
   pi.on("session_start", async (_event, ctx) => {
@@ -155,10 +157,10 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bash_async",
     label: "Async Bash",
-    description: "Run a shell command in the background and return immediately. Output is streamed to a log file, and a completion message is delivered automatically; the agent must not poll. Use timeout 0 for no limit.",
-    promptSnippet: "Start long-running shell commands in the background.",
+    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Use timeout 0 for no limit.",
+    promptSnippet: "Run lengthy commands without blocking the agent, with automatic completion notifications.",
     promptGuidelines: [
-      "Use bash_async for long-running commands such as builds, test suites, and servers. Do not poll for completion; a completion message arrives automatically.",
+      "Use bash_async for lengthy commands such as builds, test suites, and servers; reserve bash for quick commands. Do not poll for completion; a completion message arrives automatically.",
       "Use bash_check only to inspect progress, bash_send to answer a prompt on stdin, and bash_kill to stop a job.",
     ],
     parameters: Type.Object({
@@ -202,7 +204,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", "bash_check ") + theme.fg("muted", args.id), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_check")) + theme.fg("muted", ` ${args.id ?? "..."}`), 0, 0);
     },
     renderResult,
   });
@@ -226,7 +228,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", "bash_send ") + theme.fg("muted", args.id), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_send")) + theme.fg("muted", ` ${args.id ?? "..."}`), 0, 0);
     },
     renderResult,
   });
@@ -248,7 +250,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", "bash_kill ") + theme.fg("muted", args.id), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_kill")) + theme.fg("muted", ` ${args.id ?? "..."}`), 0, 0);
     },
     renderResult,
   });

@@ -85,7 +85,11 @@ async function setup(t: TestContext, options: { corrupt?: boolean; configure?: (
 test("registers the four background tools and validates their arguments", async (t) => {
   const h = await setup(t);
   assert.deepEqual([...h.tools.keys()].sort(), ["bash_async", "bash_check", "bash_kill", "bash_send"]);
-  assert.equal(h.tools.get("bash_async")!.executionMode, "sequential");
+  const tool = h.tools.get("bash_async")!;
+  assert.equal(tool.executionMode, "sequential");
+  assert.equal(tool.promptSnippet, "Run lengthy commands without blocking the agent, with automatic completion notifications.");
+  assert.ok(tool.description.startsWith(tool.promptSnippet!));
+  assert.match(tool.promptGuidelines!.join("\n"), /reserve bash for quick commands/);
   await assert.rejects(h.call("bash_async", { command: "" }), /validation|minimum/i);
   await assert.rejects(h.call("bash_check", { id: "!!" }), /validation|pattern/i);
   await assert.rejects(h.call("bash_check", { id: "zz" }), /Unknown job/);
@@ -99,6 +103,11 @@ test("async call headers use the built-in shell style and show the effective tim
     const text = render({ command: "echo hi", timeout }, theme, {}).render(200).join("\n").trimEnd();
     assert.equal(text, `<toolTitle><bold>$ echo hi</bold></toolTitle><muted> [async] (${suffix})</muted>`);
   }
+  for (const name of ["bash_check", "bash_send", "bash_kill"]) {
+    const renderCall = h.tools.get(name)!.renderCall! as Function;
+    assert.equal(renderCall({ id: "ab" }, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><muted> ab</muted>`);
+    assert.equal(renderCall({}, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><muted> ...</muted>`);
+  }
   const styles: string[] = [];
   const resultTheme = { fg: (color: string, text: string) => { styles.push(color); return text; } };
   const result = { content: [{ type: "text", text: "output" }], details: {} };
@@ -106,6 +115,23 @@ test("async call headers use the built-in shell style and show the effective tim
   renderResult(result, { expanded: false }, resultTheme, { isError: false });
   renderResult(result, { expanded: false }, resultTheme, { isError: true });
   assert.deepEqual(styles, ["toolOutput", "error"]);
+});
+
+test("completion notifications retain themed backgrounds and configured padding", () => {
+  const h = harness("/unused");
+  for (const outputPad of [0, 2]) {
+    const backgrounds: string[] = [];
+    const foregrounds: string[] = [];
+    const theme = {
+      fg: (color: string, text: string) => { foregrounds.push(color); return text; },
+      bg: (color: string, text: string) => { backgrounds.push(color); return text; },
+    };
+    const lines: string[] = h.renderers.get("async-jobs-completion")!({ content: "Job [ab] succeeded." }, { expanded: false, outputPad }, theme).render(80);
+    assert.ok(lines.includes(" ".repeat(outputPad) + "Job [ab] succeeded." + " ".repeat(80 - outputPad - "Job [ab] succeeded.".length)));
+    assert.ok(backgrounds.length > 0 && backgrounds.every((color) => color === "customMessageBg"));
+    assert.deepEqual(foregrounds, ["customMessageText"]);
+    assert.ok(lines.every((line) => visibleWidth(line) <= 80));
+  }
 });
 
 test("a finished job produces one merged completion frame and triggers a turn when idle", async (t) => {
@@ -205,7 +231,7 @@ test("large output stays bounded while expanded UI retains command and process m
   const command = "node -e \"process.stdout.write('x'.repeat(20000))\"";
   const started = await h.call("bash_async", { command });
   const render = h.tools.get("bash_async")!.renderResult! as Function;
-  const theme = { fg: (_color: string, text: string) => text };
+  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text };
   const expanded = render(started, { expanded: true }, theme, {}).render(200).join("\n");
   assert.match(expanded, /PID.*PGID/);
   assert.ok(expanded.includes(started.details!.logPath));

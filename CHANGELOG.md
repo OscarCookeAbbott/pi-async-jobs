@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Lead tool descriptions and prompt summaries with non-blocking execution and automatic notifications; reserve bash for quick commands in agent guidance.
+- Bold every tool header and show placeholders instead of undefined IDs during streaming.
+- Restore themed completion-notification backgrounds and respect configured output padding.
+
 ## 0.3.0
 
 - Use compact job acknowledgements and bounded command labels; retain command output and distinguish failed, signalled, timed-out and unknown exits.

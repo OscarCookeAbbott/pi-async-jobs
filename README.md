@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.3.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.3.1` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -55,7 +55,7 @@ Completions that arrive during an active run or within the debounce window are c
 
 ## Widget and command
 
-Async calls use the built-in shell presentation: a bold `$ command` header, an `[async]` label, and a muted effective timeout suffix, e.g. `(timeout 60s)` or `(no timeout)`. Output uses the standard tool-output colour; invocation errors use the error colour. This styling is TUI-only.
+Async calls use the built-in shell presentation: a bold `$ command` header, an `[async]` label, and a muted effective timeout suffix, e.g. `(timeout 60s)` or `(no timeout)`. Output uses the standard tool-output colour; invocation errors use the error colour. Completion notifications retain Pi's themed message background and configured output padding. This styling is TUI-only.
 
 - The widget shows `▶ [ab] 14s command`, with compact clocks (`14s`, `1:02`, `1:02:03`) ahead of command labels so long commands cannot hide the duration. It requests a redraw once per second while jobs run, without rebuilding the widget or sending model messages. Refreshes stop when the list empties or the session shuts down/restarts, and never start in non-interactive modes.
 - Command labels are single-line and stripped of terminal control sequences; each row fits the available terminal width. Multiline commands therefore cannot add unaccounted rows over the editor. The widget is hidden when no jobs are running.
