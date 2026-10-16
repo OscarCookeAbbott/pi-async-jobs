@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -91,6 +93,36 @@ test("a job streams to disk and reports its exit through a completion event", as
   assert.equal(status.running, false);
   assert.equal(status.exitCode, 0);
   assert.equal(status.tail.text, "hello\nworld");
+});
+
+test("reused job IDs finalize failures, timeouts and successes without stale results", { timeout: 5000 }, async (t) => {
+  t.mock.method(crypto, "randomBytes", (size: number) => Buffer.alloc(size));
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const dir = await workspace(t);
+  const manager = new JobManager(dir);
+  t.after(() => { manager.killAllSync(); manager.dispose(); });
+  let previousId: string | undefined;
+  for (const { command, timeout, exitCode, timedOut } of [
+    { command: "exit 1", timeout: 60, exitCode: 1, timedOut: false },
+    { command: "sleep 30", timeout: 1, exitCode: null, timedOut: true },
+    { command: "exit 0", timeout: 60, exitCode: 0, timedOut: false },
+  ]) {
+    const done = waitCompletion(manager);
+    const { id } = await manager.start(command, timeout);
+    if (previousId !== undefined) assert.equal(id, previousId);
+    previousId = id;
+    const completion = await done;
+    assert.equal(completion.id, id);
+    assert.equal(completion.exitCode, exitCode);
+    assert.equal(completion.timedOut, timedOut);
+    const status = await manager.check(id);
+    assert.equal(status.running, false);
+    assert.equal(status.exitCode, exitCode);
+    assert.equal(status.timedOut, timedOut);
+    assert.deepEqual(manager.active(), []);
+    assert.deepEqual(JSON.parse(await readFile(manager.registryPath, "utf8")), {});
+  }
 });
 
 test("running jobs accept stdin and report status with a tail", async (t) => {

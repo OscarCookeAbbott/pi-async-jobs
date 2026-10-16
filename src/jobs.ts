@@ -232,6 +232,8 @@ export class JobManager {
       child.stdin?.end(command);
     }
     const record: JobRecord = { pid: child.pid, pgid: child.pid, command, log_path: logPath, start_time: startTime, timeout };
+    this.completed.delete(id);
+    this.finished.delete(id);
     this.registry[id] = record;
     this.children.set(id, child);
     this.attachLog(id, child);

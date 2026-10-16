@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5
+
+- Clear completion and cached-result state when reusing a job ID so new jobs can finalize, notify and leave the registry normally, including after a timeout.
+- Add deterministic regression coverage for failures, timeouts and successes sharing the same recycled ID.
+
 ## 0.3.4
 
 - Explicitly tell the agent to continue independent work or end its turn after starting a background job, both in launch feedback and prompt guidance; completion notifications remain automatic.
