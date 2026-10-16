@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.3.2` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.3.3` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -55,7 +55,7 @@ Completions that arrive during an active run or within the debounce window are c
 
 ## Widget and command
 
-Async call headers show the bold `bash_async` name, an accented `$ command`, and a muted effective timeout suffix, e.g. `(timeout 60s)` or `(no timeout)`. Other job tools use bold names and accented boxed job IDs. Output uses the standard tool-output colour; invocation errors use the error colour. Completion notifications use bold, high-contrast status headings above normally styled output, retaining Pi's themed message background and configured output padding. This styling is TUI-only.
+Async call headers retain Pi's native bold `$ command` presentation, followed by a muted effective timeout and trailing `[async]` marker, e.g. `(timeout 60s) [async]` or `(no timeout) [async]`. Other job tools use bold names and bold-accented boxed job IDs. Output uses the standard tool-output colour; invocation errors use the error colour. Completion notifications use bold, high-contrast status headings above normally styled output, retaining Pi's themed message background and configured output padding. Job output bodies collapse to the last five visual lines (including wrapped long lines), with Pi's configured tool-expansion key hint; status headings remain visible. Expanding reveals retained output and process metadata, subject to the existing UI safety limits. This presentation is TUI-only and never truncates model feedback further.
 
 - The widget shows `▶ [ab] 14s command`, with compact clocks (`14s`, `1:02`, `1:02:03`) ahead of command labels so long commands cannot hide the duration. It requests a redraw once per second while jobs run, without rebuilding the widget or sending model messages. Refreshes stop when the list empties or the session shuts down/restarts, and never start in non-interactive modes.
 - Command labels are single-line and stripped of terminal control sequences; each row fits the available terminal width. Multiline commands therefore cannot add unaccounted rows over the editor. The widget is hidden when no jobs are running.

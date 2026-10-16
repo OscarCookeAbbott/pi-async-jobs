@@ -1,5 +1,5 @@
-import { getShellConfig, truncateHead, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type ExtensionAPI, type ExtensionContext, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, type CompletionFeedback, type JobMetadata } from "./format.ts";
 import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type ShellCommand } from "./jobs.ts";
@@ -10,12 +10,36 @@ const uiText = (text: string): string => {
   const shown = truncateHead(text, { maxLines: 500, maxBytes: 30000 });
   return shown.content + (shown.truncated ? "\n[Details truncated; inspect the log file for full output.]" : "");
 };
+function outputPreview(text: string, expanded: boolean, theme: Theme): Component {
+  if (expanded) return new Text(text, 0, 0);
+  let lastWidth: number | undefined;
+  let cached: string[] = [];
+  return {
+    render(width) {
+      if (width < 1) return [];
+      if (width !== lastWidth) {
+        const preview = truncateToVisualLines(text, 5, width, 0, "end");
+        const key = keyText("app.tools.expand");
+        const hint = theme.fg("muted", `... (${preview.skippedCount} earlier lines; ${key ? `${key} to expand` : "expand for full output"})`);
+        cached = preview.skippedCount ? [truncateToWidth(hint, width), ...preview.visualLines] : preview.visualLines;
+        lastWidth = width;
+      }
+      return cached;
+    },
+    invalidate() { lastWidth = undefined; },
+  };
+}
+
 const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { expanded }, theme, context) => {
   const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
   const metadata = result.details as JobMetadata | undefined;
-  const lines = [theme.fg(context?.isError ? "error" : "toolOutput", uiText(text))];
-  if (expanded && typeof metadata?.command === "string") lines.push(theme.fg("muted", uiText(formatMetadata(metadata))));
-  return new Text(lines.join("\n"), 0, 0);
+  const color = context?.isError ? "error" : "toolOutput";
+  const [heading, ...body] = uiText(text).split("\n");
+  const component = new Container();
+  component.addChild(new Text(theme.fg(color, heading!), 0, 0));
+  if (body.length) component.addChild(outputPreview(theme.fg(color, body.join("\n")), expanded, theme));
+  if (expanded && typeof metadata?.command === "string") component.addChild(new Text(theme.fg("muted", uiText(formatMetadata(metadata))), 0, 0));
+  return component;
 };
 
 export default function asyncJobsExtension(pi: ExtensionAPI): void {
@@ -117,11 +141,15 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       : content;
     const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
     let heading = true;
-    const styled = uiText(text).split("\n").map((line, index) => {
+    const headings: string[] = [];
+    const body: string[] = [];
+    uiText(text).split("\n").forEach((line, index) => {
       if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
-      return heading ? theme.fg("toolTitle", theme.bold(line)) : theme.fg("customMessageText", line);
-    }).join("\n");
-    box.addChild(new Text(styled, 0, 0));
+      if (heading) headings.push(theme.fg("toolTitle", theme.bold(line)));
+      else body.push(theme.fg("customMessageText", line));
+    });
+    box.addChild(new Text(headings.join("\n"), 0, 0));
+    if (body.length) box.addChild(outputPreview(body.join("\n"), expanded, theme));
     return box;
   });
 
@@ -185,7 +213,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     renderCall(args, theme) {
       const timeout = args.timeout ?? DEFAULT_TIMEOUT;
       const suffix = timeout === 0 ? "no timeout" : `timeout ${timeout}s`;
-      return new Text(theme.fg("toolTitle", theme.bold("bash_async")) + theme.fg("accent", ` $ ${args.command ?? "..."}`) + theme.fg("muted", ` (${suffix})`), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold(`$ ${args.command ?? "..."}`)) + theme.fg("muted", ` (${suffix}) [async]`), 0, 0);
     },
     renderResult,
   });
@@ -209,7 +237,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("bash_check")) + theme.fg(args.id ? "accent" : "muted", args.id ? ` [${args.id}]` : " ..."), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_check")) + (args.id ? theme.fg("accent", theme.bold(` [${args.id}]`)) : theme.fg("muted", " ...")), 0, 0);
     },
     renderResult,
   });
@@ -233,7 +261,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("bash_send")) + theme.fg(args.id ? "accent" : "muted", args.id ? ` [${args.id}]` : " ..."), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_send")) + (args.id ? theme.fg("accent", theme.bold(` [${args.id}]`)) : theme.fg("muted", " ...")), 0, 0);
     },
     renderResult,
   });
@@ -255,7 +283,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("bash_kill")) + theme.fg(args.id ? "accent" : "muted", args.id ? ` [${args.id}]` : " ..."), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("bash_kill")) + (args.id ? theme.fg("accent", theme.bold(` [${args.id}]`)) : theme.fg("muted", " ...")), 0, 0);
     },
     renderResult,
   });

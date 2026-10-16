@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+- Restore the native bold $ command header with muted effective timeout and trailing [async] marker.
+- Make job-ID arguments bold as well as accented; keep incomplete placeholders muted.
+- Collapse output bodies to five visual lines with Pi's expansion-key hint in tool results and completion notifications, preserving status headers and unchanged model content.
+
 ## 0.3.2
 
 - Show the actual bash_async tool name in bold, accent shell commands and job IDs, and retain muted timeout/placeholder styling without a redundant async badge.

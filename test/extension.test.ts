@@ -101,11 +101,11 @@ test("async call headers use the built-in shell style and show the effective tim
   const render = h.tools.get("bash_async")!.renderCall! as Function;
   for (const [timeout, suffix] of [[undefined, "timeout 60s"], [120, "timeout 120s"], [0, "no timeout"]] as const) {
     const text = render({ command: "echo hi", timeout }, theme, {}).render(200).join("\n").trimEnd();
-    assert.equal(text, `<toolTitle><bold>bash_async</bold></toolTitle><accent> $ echo hi</accent><muted> (${suffix})</muted>`);
+    assert.equal(text, `<toolTitle><bold>$ echo hi</bold></toolTitle><muted> (${suffix}) [async]</muted>`);
   }
   for (const name of ["bash_check", "bash_send", "bash_kill"]) {
     const renderCall = h.tools.get(name)!.renderCall! as Function;
-    assert.equal(renderCall({ id: "ab" }, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><accent> [ab]</accent>`);
+    assert.equal(renderCall({ id: "ab" }, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><accent><bold> [ab]</bold></accent>`);
     assert.equal(renderCall({}, theme, {}).render(200).join("\n").trimEnd(), `<toolTitle><bold>${name}</bold></toolTitle><muted> ...</muted>`);
   }
   const styles: string[] = [];
@@ -147,6 +147,35 @@ test("batched notifications emphasise status headers without styling log text as
   const rendered = h.renderers.get("async-jobs-completion")!({ content }, { expanded: false, outputPad: 0 }, theme).render(200);
   assert.equal(rendered.map((line: string) => line.trim()).filter(Boolean).join("\n"), content);
   assert.deepEqual(headings, content.split("\n").slice(0, 3));
+});
+
+test("job outputs collapse by visual lines and expand without changing model content", () => {
+  const h = harness("/unused");
+  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
+  for (const body of [Array.from({ length: 25 }, (_, index) => `line ${index}`).join("\n"), "x".repeat(1000)]) {
+    const content = `Job [ab] succeeded.\nOutput [ab]:\nSTART\n${body}\nFINISH`;
+    const result = { content: [{ type: "text", text: content }], details: {} };
+    const render = h.tools.get("bash_check")!.renderResult! as Function;
+    const collapsed: string[] = render(result, { expanded: false }, theme, {}).render(40);
+    const expanded: string[] = render(result, { expanded: true }, theme, {}).render(40);
+    assert.ok(collapsed.length <= 7);
+    assert.match(collapsed.join("\n"), /Job \[ab\] succeeded/);
+    assert.match(collapsed.join("\n"), /expand/);
+    assert.match(collapsed.join("\n"), /FINISH/);
+    assert.doesNotMatch(collapsed.join("\n"), /START/);
+    assert.match(expanded.join("\n"), /START/);
+    assert.ok(expanded.length > collapsed.length);
+    const message = { content };
+    const renderer = h.renderers.get("async-jobs-completion")!;
+    const notification: string[] = renderer(message, { expanded: false, outputPad: 0 }, theme).render(40);
+    assert.ok(notification.length <= 9);
+    assert.match(notification.join("\n"), /expand/);
+    assert.doesNotMatch(notification.join("\n"), /START/);
+    assert.match(renderer(message, { expanded: true, outputPad: 0 }, theme).render(40).join("\n"), /START/);
+    assert.ok([...collapsed, ...notification].every((line) => visibleWidth(line) <= 40));
+    assert.equal(result.content[0].text, content);
+    assert.equal(message.content, content);
+  }
 });
 
 test("a finished job produces one merged completion frame and triggers a turn when idle", async (t) => {
