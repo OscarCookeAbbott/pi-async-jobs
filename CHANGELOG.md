@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Explicitly tell the agent to continue independent work or end its turn after starting a background job, both in launch feedback and prompt guidance; completion notifications remain automatic.
+
 ## 0.3.3
 
 - Restore the native bold $ command header with muted effective timeout and trailing [async] marker.

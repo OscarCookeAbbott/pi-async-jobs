@@ -22,7 +22,7 @@ Do not also keep a copied version under `~/.pi/agent/extensions/`: it would regi
 
 ## Why background jobs
 
-A foreground `bash` call blocks the turn until the command finishes. `bash_async` starts the command in its own process group, returns immediately, and streams stdout and stderr to a log file. When the process exits, times out, or is killed, the extension delivers one completion message to the model. If the agent is idle, that message starts a turn; if a run is active, the message steers it. The model does not need to poll.
+A foreground `bash` call blocks the turn until the command finishes. `bash_async` starts the command in its own process group, returns immediately, and streams stdout and stderr to a log file. When the process exits, times out, or is killed, the extension delivers one completion message to the model. If the agent is idle, that message starts a turn; if a run is active, the message steers it. After starting a job, the agent should continue independent work or end its turn; completion wakes an idle agent automatically. The model does not need to poll.
 
 ## Agent tools
 
@@ -30,7 +30,7 @@ Each job gets a two-character ID (`00`–`zz`, 1,296 possible values) that is re
 
 | Tool | Arguments | Behaviour |
 | --- | --- | --- |
-| `bash_async` | `command`; optional `timeout` (seconds, default 60, `0` for none) | Spawns a detached process group, writes the registry entry, and starts the log stream. Returns `Job [<id>] started.`; PID, process group, full command and log path remain in expanded TUI details |
+| `bash_async` | `command`; optional `timeout` (seconds, default 60, `0` for none) | Spawns a detached process group, writes the registry entry, and starts the log stream. Returns `Job [<id>] started in background.` with guidance to continue independent work or end the turn until notified; PID, process group, full command and log path remain in expanded TUI details |
 | `bash_check` | `id`; optional `tail_lines` (default 50) | Reports `running` or the exit code and returns the last log lines |
 | `bash_send` | `id`, `input` | Writes `input` plus a newline to the process stdin |
 | `bash_kill` | `id` | Sends `SIGINT` to the process group, falling back to `SIGKILL` after a five-second grace period |

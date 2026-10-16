@@ -193,7 +193,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Use timeout 0 for no limit.",
     promptSnippet: "Run lengthy commands without blocking the agent, with automatic completion notifications.",
     promptGuidelines: [
-      "Use bash_async for lengthy commands such as builds, test suites, and servers; reserve bash for quick commands. Do not poll for completion; a completion message arrives automatically.",
+      "Use bash_async for lengthy commands such as builds, test suites, and servers; reserve bash for quick commands. After starting a job, continue independent work or end your turn. Do not poll for completion; a completion message arrives automatically.",
       "Use bash_check only to inspect progress, bash_send to answer a prompt on stdin, and bash_kill to stop a job.",
     ],
     parameters: Type.Object({
@@ -206,7 +206,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd);
       updateWidget();
       return {
-        content: [{ type: "text", text: `Job [${jobId}] started.` }],
+        content: [{ type: "text", text: `Job [${jobId}] started in background. Continue independent work, or end your turn; completion will notify you automatically.` }],
         details: jobMetadata(jobId, record),
       };
     },

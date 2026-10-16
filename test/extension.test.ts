@@ -90,6 +90,7 @@ test("registers the four background tools and validates their arguments", async 
   assert.equal(tool.promptSnippet, "Run lengthy commands without blocking the agent, with automatic completion notifications.");
   assert.ok(tool.description.startsWith(tool.promptSnippet!));
   assert.match(tool.promptGuidelines!.join("\n"), /reserve bash for quick commands/);
+  assert.match(tool.promptGuidelines!.join("\n"), /continue independent work or end your turn/);
   await assert.rejects(h.call("bash_async", { command: "" }), /validation|minimum/i);
   await assert.rejects(h.call("bash_check", { id: "!!" }), /validation|pattern/i);
   await assert.rejects(h.call("bash_check", { id: "zz" }), /Unknown job/);
@@ -187,7 +188,7 @@ test("a finished job produces one merged completion frame and triggers a turn wh
   assert.equal(h.messages[0].message.customType, "async-jobs-completion");
   assert.equal(h.messages[0].options.triggerTurn, true);
   assert.match(h.messages[0].message.content, /Job \[[0-9a-z]{2}\] succeeded/);
-  assert.equal(h.text(started), `Job [${id}] started.`);
+  assert.equal(h.text(started), `Job [${id}] started in background. Continue independent work, or end your turn; completion will notify you automatically.`);
   assert.doesNotMatch(h.messages[0].message.content, /PID|PGID|Log[s]?:/);
   assert.match(h.messages[0].message.content, /printf/);
   assert.match(h.messages[0].message.content, /hi/);
