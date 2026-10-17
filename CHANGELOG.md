@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6
+
+- Keep finished jobs in the widget until their completion notification is delivered, with distinct markers and colours for success, failure, timeout, signal and unknown outcomes.
+- Toggle completion notifications by clicking them, independently of the global tool-output shortcut.
+
 ## 0.3.5
 
 - Clear completion and cached-result state when reusing a job ID so new jobs can finalize, notify and leave the registry normally, including after a timeout.

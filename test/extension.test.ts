@@ -63,9 +63,9 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     text(result: { content: Array<{ type: string; text?: string }> }): string {
       return result.content.flatMap((item) => item.type === "text" ? [item.text ?? ""] : []).join("\n");
     },
-    widgetLines(width = 80): string[] {
+    widgetLines(width = 80, theme: { fg: (color: string, text: string) => string } = { fg: (_color, text) => text }): string[] {
       const factory = widgets.get("async-jobs");
-      return factory ? factory({ requestRender: () => { renderRequests++; } }, { fg: (_color: string, text: string) => text }).render(width) : [];
+      return factory ? factory({ requestRender: () => { renderRequests++; } }, theme).render(width) : [];
     },
   };
 }
@@ -179,6 +179,26 @@ test("job outputs collapse by visual lines and expand without changing model con
   }
 });
 
+test("completion notifications expand and collapse when clicked", () => {
+  const h = harness("/unused");
+  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const content = `Job [ab] succeeded.\nOutput [ab]:\nSTART\n${Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n")}\nFINISH`;
+  const message = { content };
+  const renderer = h.renderers.get("async-jobs-completion")!;
+  const component = renderer(message, { expanded: false, outputPad: 0 }, theme);
+  assert.doesNotMatch(component.render(80).join("\n"), /START/);
+  assert.deepEqual(component.handleMouse({ type: "click", button: "left" }), { handled: true });
+  assert.match(component.render(80).join("\n"), /START/);
+  component.handleMouse({ type: "click", button: "left" });
+  assert.doesNotMatch(component.render(80).join("\n"), /START/);
+  // A click survives a renderer rebuild until the global shortcut changes state.
+  assert.doesNotMatch(renderer(message, { expanded: false, outputPad: 0 }, theme).render(80).join("\n"), /START/);
+  component.handleMouse({ type: "click", button: "left" });
+  assert.match(renderer(message, { expanded: false, outputPad: 0 }, theme).render(80).join("\n"), /START/);
+  assert.match(renderer(message, { expanded: true, outputPad: 0 }, theme).render(80).join("\n"), /START/);
+  assert.doesNotMatch(renderer(message, { expanded: false, outputPad: 0 }, theme).render(80).join("\n"), /START/);
+});
+
 test("a finished job produces one merged completion frame and triggers a turn when idle", async (t) => {
   const h = await setup(t);
   h.setIdle(true);
@@ -229,6 +249,10 @@ test("running jobs appear in the widget and can be inspected, fed, and killed", 
   await h.command.handler("", h.ctx);
   assert.ok(h.notifications.at(-1)!.includes(id));
   assert.equal(h.text(await h.call("bash_kill", { id })), `Job [${id}] terminated.`);
+  const finished = h.widgetLines();
+  assert.match(finished[0]!, /1 finished/);
+  assert.ok(finished.some((line) => line.includes(id)));
+  await waitUntil(() => h.messages.length > 0);
   assert.deepEqual(h.widgetLines(), []);
 });
 
@@ -257,6 +281,27 @@ test("running durations redraw once per second without rebuilding widgets or mes
   const requests = h.renderRequests;
   t.mock.timers.tick(1000);
   assert.equal(h.renderRequests, requests);
+  const finished = h.widgetLines();
+  assert.match(finished[0]!, /1 finished/);
+  assert.ok(finished.some((line) => line.includes(id)));
+});
+
+test("finished jobs stay visible with an outcome marker until their notification is sent", async (t) => {
+  process.env.PI_JOBS_DEBOUNCE_MS = "500";
+  t.after(() => delete process.env.PI_JOBS_DEBOUNCE_MS);
+  const h = await setup(t);
+  const started = await h.call("bash_async", { command: "exit 3" });
+  const { id } = started.details!;
+  await waitUntil(() => h.widgetLines().some((line) => /1 finished/.test(line)));
+  const colors: string[] = [];
+  const finished = h.widgetLines(80, {
+    fg: (color, text) => { colors.push(color); return text; },
+  });
+  assert.match(finished[0]!, /1 finished/);
+  assert.match(finished[1]!, new RegExp(`✗ \\[${id}\\] `));
+  assert.ok(colors.includes("muted") && colors.includes("error"));
+  assert.equal(h.messages.length, 0);
+  await waitUntil(() => h.messages.length === 1);
   assert.deepEqual(h.widgetLines(), []);
 });
 

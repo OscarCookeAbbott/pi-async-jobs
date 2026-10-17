@@ -1,7 +1,7 @@
-import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type ExtensionAPI, type ExtensionContext, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type ExtensionAPI, type ExtensionContext, type Theme, type ThemeColor, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, type CompletionFeedback, type JobMetadata } from "./format.ts";
+import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
 import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type ShellCommand } from "./jobs.ts";
 
 const COMPLETION_TAIL_LINES = 20;
@@ -27,6 +27,47 @@ function outputPreview(text: string, expanded: boolean, theme: Theme): Component
       return cached;
     },
     invalidate() { lastWidth = undefined; },
+  };
+}
+
+const OUTCOME_COLORS: Record<JobOutcome, ThemeColor> = {
+  running: "accent",
+  success: "success",
+  failure: "error",
+  timeout: "warning",
+  signal: "warning",
+  unknown: "dim",
+};
+
+interface MessageExpansion {
+  global: boolean;
+  expanded: boolean;
+}
+
+interface MessageIdentity {
+  readonly customType: string;
+}
+
+const messageExpansion = new WeakMap<MessageIdentity, MessageExpansion>();
+
+/** Keep click expansion local while still following the global tool-output shortcut. */
+function expandableMessage(message: MessageIdentity, expanded: boolean, build: (expanded: boolean) => Component): Component {
+  let state = messageExpansion.get(message);
+  if (!state || state.global !== expanded) {
+    state = { global: expanded, expanded };
+    messageExpansion.set(message, state);
+  }
+  const expansion = state;
+  let content = build(expansion.expanded);
+  return {
+    render(width) { return content.render(width); },
+    invalidate() { content.invalidate(); },
+    handleMouse(event) {
+      if (event.type !== "click" || event.button !== "left") return undefined;
+      expansion.expanded = !expansion.expanded;
+      content = build(expansion.expanded);
+      return { handled: true };
+    },
   };
 }
 
@@ -87,22 +128,36 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       stopWidgetRefresh();
       return;
     }
-    const jobs = manager?.active() ?? [];
+    const active = manager?.active() ?? [];
+    const finished = pending.map((completion) => ({
+      id: completion.id,
+      record: completion.record,
+      running: false,
+      outcome: jobOutcome(completion),
+    }));
+    const jobs = [
+      ...active.map(({ id, record, running }) => ({ id, record, running, outcome: jobOutcome({ running }) })),
+      ...finished,
+    ];
     if (!jobs.length) {
       stopWidgetRefresh();
       ctx.ui.setWidget("async-jobs", undefined);
       return;
     }
+    const runningCount = jobs.filter(({ running }) => running).length;
+    const finishedCount = jobs.length - runningCount;
+    if (!runningCount) stopWidgetRefresh();
+    const headingText = ["Jobs", runningCount ? `${runningCount} running` : "", finishedCount ? `${finishedCount} finished` : ""].filter(Boolean).join(" · ");
     ctx.ui.setWidget("async-jobs", (tui, theme) => {
       requestWidgetRender = () => tui.requestRender();
       return {
         render(width: number): string[] {
-          const heading = truncateToWidth(theme.fg("muted", `Jobs · ${jobs.length} running`), width);
+          const heading = truncateToWidth(theme.fg("muted", headingText), width);
           const now = Math.floor(Date.now() / 1000);
           return [
             heading,
-            ...jobs.slice(0, 6).map(({ id, record, running }) =>
-              truncateToWidth(theme.fg(running ? "accent" : "warning", formatJobLine(id, record.command, running, Math.max(0, now - record.start_time))), width),
+            ...jobs.slice(0, 6).map(({ id, record, running, outcome }) =>
+              truncateToWidth(theme.fg(OUTCOME_COLORS[outcome], formatJobLine(id, record.command, running, Math.max(0, now - record.start_time), outcome)), width),
             ),
             ...(jobs.length > 6 ? [truncateToWidth(theme.fg("dim", `+${jobs.length - 6} more`), width)] : []),
           ];
@@ -110,7 +165,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
         invalidate() {},
       };
     });
-    if (!refreshTimer) {
+    if (!refreshTimer && runningCount) {
       refreshTimer = setInterval(() => requestWidgetRender?.(), 1000);
       refreshTimer.unref?.();
     }
@@ -118,14 +173,17 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   async function flush(): Promise<void> {
     flushTimer = undefined;
+    if (!pending.length) return;
     const batch = pending;
-    pending = [];
-    if (!batch.length) return;
-    const jobs = await Promise.all(batch.map(async (completion) => ({ completion, tail: await tailFile(completion.record.log_path, COMPLETION_TAIL_LINES) })));
-    const content = formatCompletions(jobs);
-    // Steer an active run; start a turn when the agent is idle. Either way the batch is one frame.
-    pi.sendMessage({ customType: "async-jobs-completion", content, display: true, details: { jobs } }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
-    updateWidget();
+    try {
+      const jobs = await Promise.all(batch.map(async (completion) => ({ completion, tail: await tailFile(completion.record.log_path, COMPLETION_TAIL_LINES) })));
+      const content = formatCompletions(jobs);
+      // Steer an active run; start a turn when the agent is idle. Either way the batch is one frame.
+      pi.sendMessage({ customType: "async-jobs-completion", content, display: true, details: { jobs } }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
+    } finally {
+      pending = pending.filter((completion) => !batch.includes(completion));
+      updateWidget();
+    }
   }
 
   function enqueue(completion: JobCompletion): void {
@@ -136,21 +194,23 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   pi.registerMessageRenderer<{ jobs: CompletionFeedback[] }>("async-jobs-completion", (message, { expanded, outputPad }, theme) => {
     const content = typeof message.content === "string" ? message.content : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
-    const text = expanded && message.details?.jobs
-      ? message.details.jobs.map(({ completion, tail }) => `${formatMetadata(jobMetadata(completion.id, completion.record))}\n${formatStatus({ ...completion, running: false, tail })}`).join("\n\n")
-      : content;
-    const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
-    let heading = true;
-    const headings: string[] = [];
-    const body: string[] = [];
-    uiText(text).split("\n").forEach((line, index) => {
-      if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
-      if (heading) headings.push(theme.fg("toolTitle", theme.bold(line)));
-      else body.push(theme.fg("customMessageText", line));
+    return expandableMessage(message, expanded, (showDetails) => {
+      const text = showDetails && message.details?.jobs
+        ? message.details.jobs.map(({ completion, tail }) => `${formatMetadata(jobMetadata(completion.id, completion.record))}\n${formatStatus({ ...completion, running: false, tail })}`).join("\n\n")
+        : content;
+      const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
+      let heading = true;
+      const headings: string[] = [];
+      const body: string[] = [];
+      uiText(text).split("\n").forEach((line, index) => {
+        if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
+        if (heading) headings.push(theme.fg("toolTitle", theme.bold(line)));
+        else body.push(theme.fg("customMessageText", line));
+      });
+      box.addChild(new Text(headings.join("\n"), 0, 0));
+      if (body.length) box.addChild(outputPreview(body.join("\n"), showDetails, theme));
+      return box;
     });
-    box.addChild(new Text(headings.join("\n"), 0, 0));
-    if (body.length) box.addChild(outputPreview(body.join("\n"), expanded, theme));
-    return box;
   });
 
   pi.on("session_start", async (_event, ctx) => {

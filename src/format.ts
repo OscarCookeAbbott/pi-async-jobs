@@ -12,6 +12,33 @@ function commandLabel(command: string): string {
   return characters.slice(0, 120).join("") + (characters.length > 120 ? "…" : "");
 }
 
+export type JobOutcome = "running" | "success" | "failure" | "timeout" | "signal" | "unknown";
+
+export interface JobOutcomeInput {
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  timedOut?: boolean;
+  running?: boolean;
+}
+
+export function jobOutcome(job: JobOutcomeInput): JobOutcome {
+  if (job.running) return "running";
+  if (job.timedOut) return "timeout";
+  if (job.signal) return "signal";
+  if (job.exitCode === 0) return "success";
+  if (job.exitCode === null || job.exitCode === undefined) return "unknown";
+  return "failure";
+}
+
+const OUTCOME_GLYPHS: Record<JobOutcome, string> = {
+  running: "▶",
+  success: "✓",
+  failure: "✗",
+  timeout: "⏱",
+  signal: "⚠",
+  unknown: "?",
+};
+
 function summary(job: JobCompletion | JobStatus): string {
   const status = "running" in job && job.running ? "running"
     : job.timedOut ? `timed out after ${job.record.timeout}s`
@@ -61,13 +88,13 @@ export function formatMetadata(metadata: JobMetadata): string {
   return `Job [${metadata.id}] · PID ${metadata.pid} · PGID ${metadata.pgid}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
 }
 
-export function formatJobLine(id: string, command: string, running: boolean, runtimeSeconds: number): string {
+export function formatJobLine(id: string, command: string, running: boolean, runtimeSeconds: number, outcome: JobOutcome = running ? "running" : "unknown"): string {
   const minutes = Math.floor(runtimeSeconds / 60);
   const seconds = String(runtimeSeconds % 60).padStart(2, "0");
   let duration = `${runtimeSeconds}s`;
   if (minutes >= 60) duration = `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${seconds}`;
   else if (minutes) duration = `${minutes}:${seconds}`;
-  return `${running ? "▶" : "…"} [${id}] ${duration} ${commandLabel(command)}`;
+  return `${OUTCOME_GLYPHS[outcome]} [${id}] ${duration} ${commandLabel(command)}`;
 }
 
 export function jobMetadata(id: string, record: JobRecord): JobMetadata {
