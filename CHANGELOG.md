@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Use a colon after `Agent finished` in running-job notification summaries.
+
 ## 0.5.0
 
 - Replace the agent-settled notification with live running-job IDs through notifications:prepare, without sending a second notification or requiring job-change notifications to be enabled.

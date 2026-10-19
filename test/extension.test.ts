@@ -419,25 +419,27 @@ test("command-based kills notify and broken optional consumers never affect job 
 test("settled preparation replaces the default only while jobs run, even with job notifications off", async (t) => {
   const h = await setup(t);
   const prepare = (event = "agent_settled") => {
-    const draft = { event, title: "Pi", message: "Agent finished." };
+    const draft = { event, title: "Pi", message: "Agent finished:" };
     h.bus.emit("notifications:prepare", draft);
     return draft.message;
   };
-  assert.equal(prepare(), "Agent finished.");
+  assert.equal(prepare(), "Agent finished:");
   const first = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 0 });
   const second = await h.call("bash_async", { command: "cat", timeout: 0 });
-  assert.equal(prepare("turn_end"), "Agent finished.");
+  assert.equal(prepare("turn_end"), "Agent finished:");
   const message = prepare();
-  assert.match(message, /^Agent finished\. Jobs running:/);
+  assert.match(message, /^Agent finished: Jobs running:/);
   assert.deepEqual(message.match(/\[[0-9a-z]{2}\]/g)?.sort(), [`[${first.details!.id}]`, `[${second.details!.id}]`].sort());
   assert.ok(!message.includes("PRIVATE_COMMAND"));
   await h.call("bash_kill", { id: first.details!.id });
-  assert.equal(prepare(), `Agent finished. Jobs running: [${second.details!.id}].`);
+  assert.equal(prepare(), `Agent finished: Jobs running: [${second.details!.id}].`);
   let assignments = 0;
   h.bus.emit("notifications:prepare", { event: "agent_settled", set message(_value: string) { assignments++; } });
   assert.equal(assignments, 1, "Exactly one preparation hook should contribute");
   assert.deepEqual(h.events, [], "Preparation must not emit a second notification or require job-change notifications");
+  await h.call("bash_kill", { id: second.details!.id });
+  assert.equal(prepare(), "Agent finished:");
   h.emit("session_shutdown");
-  assert.equal(prepare(), "Agent finished.");
+  assert.equal(prepare(), "Agent finished:");
   h.emit("session_shutdown");
 });

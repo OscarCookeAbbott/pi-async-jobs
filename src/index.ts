@@ -260,7 +260,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       if (!running.length) return;
       const ids = running.slice(0, 10).map(({ id }) => `[${id}]`).join(", ");
       const remaining = running.length > 10 ? `, +${running.length - 10} more` : "";
-      draft.message = `Agent finished. Jobs running: ${ids}${remaining}.`;
+      draft.message = `Agent finished: Jobs running: ${ids}${remaining}.`;
     });
     const onExit = (): void => manager?.killAllSync();
     process.on("exit", onExit);
