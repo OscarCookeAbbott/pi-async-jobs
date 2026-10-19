@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.3.3` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.4.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -65,6 +65,31 @@ Async call headers retain Pi's native bold `$ command` presentation, followed by
 - `/jobs kill-all` terminates every running job.
 
 Commands work in all modes; the widget requires TUI mode.
+
+## Optional desktop notifications
+
+Desktop notifications default to **off** and are separate from the agent-facing completion messages, which always remain enabled. `pi-notifications` is declared as an optional Git dependency; its absence or failure never prevents job execution. Load it once as a Pi package; dependency copies are not automatically registered:
+
+```sh
+pi install git:github.com/OscarCookeAbbott/pi-notifications
+```
+
+Configure in Pi settings and `/reload`:
+
+```json
+{
+  "asyncJobs": { "notifications": "completed" }
+}
+```
+
+`asyncJobs.notifications` accepts:
+
+- `none` (default): no desktop notifications.
+- `started`: job starts only.
+- `completed`: job completions, including failure, timeout, cancellation and unknown status.
+- `all`: starts, completions, input sends and successful explicit termination, including `/jobs kill` and `/jobs kill-all`.
+
+Events are `jobs.started`, `jobs.completed`, `jobs.input` and `jobs.terminated`, emitted through `notifications:notify`. Notification text includes only the job ID and status, never command text, input or log output. An explicit kill can notify both completion and termination because these report distinct changes. Reads, lists, restoration, streaming log writes, failed operations and shutdown cleanup do not notify. `notifications.events` can filter individual events further. Invalid settings warn and disable desktop notifications without affecting job control.
 
 ## State and recovery
 

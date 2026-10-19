@@ -1,6 +1,6 @@
 {
   "name": "@oscar-robin/pi-async-jobs",
-  "version": "0.3.6",
+  "version": "0.4.0",
   "description": "Background shell jobs with event-driven steering for Pi.",
   "type": "module",
   "license": "MIT",
@@ -45,6 +45,9 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "optionalDependencies": {
+    "@oscar-robin/pi-notifications": "git+https://github.com/OscarCookeAbbott/pi-notifications.git#v0.1.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "1.2.0",

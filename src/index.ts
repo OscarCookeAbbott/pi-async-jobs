@@ -4,6 +4,8 @@ import { Type } from "typebox";
 import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
 import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type ShellCommand } from "./jobs.ts";
 
+type NotificationMode = "none" | "started" | "completed" | "all";
+
 const COMPLETION_TAIL_LINES = 20;
 const id = Type.String({ pattern: "^[0-9a-z]{2}$", description: "Two-character job ID" });
 const uiText = (text: string): string => {
@@ -92,7 +94,17 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let refreshTimer: NodeJS.Timeout | undefined;
   let requestWidgetRender: (() => void) | undefined;
   let removeExitHook: (() => void) | undefined;
+  let notificationMode: NotificationMode = "none";
   const debounceMs = Number(process.env.PI_JOBS_DEBOUNCE_MS ?? 200);
+
+  function notifyChange(event: "started" | "completed" | "input" | "terminated", message: string): void {
+    if (notificationMode !== "all" && notificationMode !== event) return;
+    try {
+      pi.events.emit("notifications:notify", { event: `jobs.${event}`, title: "Pi Jobs", message });
+    } catch {
+      // Optional notification delivery must not affect job control or completion.
+    }
+  }
 
   function requireManager(): JobManager {
     if (loadError) throw new Error(`Async jobs registry is unavailable: ${loadError}`);
@@ -187,6 +199,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   }
 
   function enqueue(completion: JobCompletion): void {
+    notifyChange("completed", `Job [${completion.id}] finished: ${jobOutcome(completion)}.`);
     pending.push(completion);
     if (!flushTimer) flushTimer = setTimeout(() => void flush().catch(() => {}), Number.isFinite(debounceMs) ? debounceMs : 200);
     updateWidget();
@@ -216,6 +229,14 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     stopWidgetRefresh();
     ctxRef = ctx;
+    notificationMode = "none";
+    try {
+      const configured = (pi.getSettings() as { asyncJobs?: { notifications?: unknown } }).asyncJobs?.notifications;
+      if (configured !== undefined && !["none", "started", "completed", "all"].includes(configured as string)) throw new Error("asyncJobs.notifications must be none, started, completed, or all.");
+      notificationMode = (configured ?? "none") as NotificationMode;
+    } catch (error) {
+      ctx.ui.notify(`Async jobs: ${error instanceof Error ? error.message : String(error)} Desktop notifications disabled.`, "warning");
+    }
     manager?.dispose();
     manager = new JobManager(undefined, { shell: resolveShell(ctx) });
     loadError = undefined;
@@ -235,6 +256,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    notificationMode = "none";
     stopWidgetRefresh();
     manager?.killAllSync();
     removeExitHook?.();
@@ -265,6 +287,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd);
       updateWidget();
+      notifyChange("started", `Job [${jobId}] started.`);
       return {
         content: [{ type: "text", text: `Job [${jobId}] started in background. Continue independent work, or end your turn; completion will notify you automatically.` }],
         details: jobMetadata(jobId, record),
@@ -315,6 +338,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async execute(_toolCallId, params) {
       requireManager().send(params.id, params.input);
+      notifyChange("input", `Input sent to job [${params.id}].`);
       return {
         content: [{ type: "text", text: `Input sent to job [${params.id}].` }],
         details: { id: params.id },
@@ -337,6 +361,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     async execute(_toolCallId, params) {
       const record = await requireManager().kill(params.id);
       updateWidget();
+      notifyChange("terminated", `Job [${params.id}] terminated.`);
       return {
         content: [{ type: "text", text: `Job [${params.id}] terminated.` }],
         details: jobMetadata(params.id, record),
@@ -361,6 +386,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
         for (const jobId of ids) {
           try {
             await manager?.kill(jobId);
+            notifyChange("terminated", `Job [${jobId}] terminated.`);
           } catch {
             // Keep terminating the rest.
           }
@@ -374,6 +400,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
         try {
           const record = await requireManager().kill(jobId);
           updateWidget();
+          notifyChange("terminated", `Job [${jobId}] terminated.`);
           ctx.ui.notify(`Job ${jobId} (PGID ${record.pgid}) terminated.`, "info");
         } catch (error) {
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");

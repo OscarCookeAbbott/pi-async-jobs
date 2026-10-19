@@ -25,11 +25,13 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
   const messages: Array<{ message: any; options: any }> = [];
   const renderers = new Map<string, Function>();
   const notifications: string[] = [];
+  const events: Array<{ name: string; payload: { event: string; title: string; message: string } }> = [];
   const widgets = new Map<string, any>();
   let command: any;
   let idle = true;
   let renderRequests = 0;
   let widgetUpdates = 0;
+  let failNotifications = false;
   const ctx = {
     mode: "tui",
     cwd: dir,
@@ -46,15 +48,20 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     registerCommand: (_name: string, definition: any) => { command = definition; },
     registerMessageRenderer: (name: string, renderer: Function) => renderers.set(name, renderer),
     getSettings: () => settings,
+    events: { emit: (name: string, payload: { event: string; title: string; message: string }) => {
+      if (failNotifications) throw new Error("Notification listener unavailable");
+      events.push({ name, payload });
+    } },
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
   return {
-    dir, tools, messages, renderers, notifications, widgets, ctx, emit,
+    dir, tools, messages, renderers, notifications, events, widgets, ctx, emit,
     get command() { return command; },
     get renderRequests() { return renderRequests; },
     get widgetUpdates() { return widgetUpdates; },
     setIdle(value: boolean) { idle = value; },
+    failNotifications() { failNotifications = true; },
     async call(name: string, params: JsonObject) {
       const tool = tools.get(name)!;
       const validated = validateToolArguments(tool, { type: "toolCall", id: "call", name, arguments: params });
@@ -367,4 +374,42 @@ test("an invalid shellPath warns and falls back to the default shell", async (t)
   const started = await h.call("bash_async", { command: "echo fellback" });
   await waitUntil(() => h.messages.length === 1);
   assert.match(await readFile(started.details!.logPath, "utf8"), /fellback/);
+});
+
+test("desktop notifications default off and filter job changes without exposing commands or input", async (t) => {
+  for (const mode of [undefined, "none", "started", "completed", "all", "invalid", true, null]) {
+    await t.test(`mode ${mode}`, async (t) => {
+      const h = await setup(t, { configure: async () => mode === undefined ? {} : { asyncJobs: { notifications: mode } } });
+      const started = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 0 });
+      const id = started.details!.id;
+      await h.call("bash_send", { id, input: "PRIVATE_INPUT" });
+      await h.call("bash_check", { id });
+      await h.call("bash_kill", { id });
+      await waitUntil(() => h.messages.length === 1);
+      const expected = ["started", "input", "completed", "terminated"].filter((event) => mode === "all" || mode === event).map((event) => `jobs.${event}`);
+      assert.deepEqual(h.events.map(({ payload }) => payload.event), expected);
+      assert.ok(h.events.every(({ name, payload }) => name === "notifications:notify" && payload.title === "Pi Jobs" && !/PRIVATE/.test(payload.message)));
+      if (mode === "invalid" || mode === true || mode === null) assert.match(h.notifications[0], /asyncJobs.notifications/);
+      const count = h.events.length;
+      await assert.rejects(h.call("bash_send", { id: "!!", input: "No" }));
+      await assert.rejects(h.call("bash_kill", { id: "!!" }));
+      await assert.rejects(h.call("bash_async", { command: " " }));
+      assert.equal(h.events.length, count);
+    });
+  }
+});
+
+test("command-based kills notify and broken optional consumers never affect job control", async (t) => {
+  const h = await setup(t, { configure: async () => ({ asyncJobs: { notifications: "all" } }) });
+  const first = await h.call("bash_async", { command: "cat", timeout: 0 });
+  await h.command.handler(`kill ${first.details!.id}`, h.ctx);
+  const second = await h.call("bash_async", { command: "cat", timeout: 0 });
+  await h.command.handler("kill-all", h.ctx);
+  assert.equal(h.events.filter(({ payload }) => payload.event === "jobs.terminated").length, 2);
+  assert.ok(h.events.some(({ payload }) => payload.event === "jobs.completed" && payload.message.includes(second.details!.id)));
+  h.failNotifications();
+  const third = await h.call("bash_async", { command: "cat", timeout: 0 });
+  await h.call("bash_send", { id: third.details!.id, input: "hi" });
+  await h.call("bash_kill", { id: third.details!.id });
+  await waitUntil(() => h.messages.some(({ message }) => message.details.jobs.some(({ completion }: { completion: { id: string } }) => completion.id === third.details!.id)));
 });

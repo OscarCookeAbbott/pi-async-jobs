@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0
+
+- Add opt-in desktop notifications for job starts, completions, input sends and explicit termination, with asyncJobs.notifications modes none (default), started, completed and all.
+- Declare pi-notifications as an optional Git dependency; absent or broken notification consumers do not affect job control or agent-facing completion steering.
+
 ## 0.3.6
 
 - Keep finished jobs in the widget until their completion notification is delivered, with distinct markers and colours for success, failure, timeout, signal and unknown outcomes.
