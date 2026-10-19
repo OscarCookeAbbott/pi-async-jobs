@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import extension from "../src/index.ts";
@@ -21,6 +21,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
 
 function harness(dir: string, settings: Record<string, unknown> = {}) {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
+  const bus = createEventBus();
   const tools = new Map<string, ToolDefinition<TSchema, Details>>();
   const messages: Array<{ message: any; options: any }> = [];
   const renderers = new Map<string, Function>();
@@ -48,15 +49,16 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     registerCommand: (_name: string, definition: any) => { command = definition; },
     registerMessageRenderer: (name: string, renderer: Function) => renderers.set(name, renderer),
     getSettings: () => settings,
-    events: { emit: (name: string, payload: { event: string; title: string; message: string }) => {
+    events: { on: bus.on, emit: (name: string, payload: { event: string; title: string; message: string }) => {
       if (failNotifications) throw new Error("Notification listener unavailable");
       events.push({ name, payload });
+      bus.emit(name, payload);
     } },
     sendMessage: (message: any, options: any) => messages.push({ message, options }),
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
   return {
-    dir, tools, messages, renderers, notifications, events, widgets, ctx, emit,
+    dir, tools, messages, renderers, notifications, events, widgets, ctx, emit, bus,
     get command() { return command; },
     get renderRequests() { return renderRequests; },
     get widgetUpdates() { return widgetUpdates; },
@@ -412,4 +414,30 @@ test("command-based kills notify and broken optional consumers never affect job 
   await h.call("bash_send", { id: third.details!.id, input: "hi" });
   await h.call("bash_kill", { id: third.details!.id });
   await waitUntil(() => h.messages.some(({ message }) => message.details.jobs.some(({ completion }: { completion: { id: string } }) => completion.id === third.details!.id)));
+});
+
+test("settled preparation replaces the default only while jobs run, even with job notifications off", async (t) => {
+  const h = await setup(t);
+  const prepare = (event = "agent_settled") => {
+    const draft = { event, title: "Pi", message: "Agent finished." };
+    h.bus.emit("notifications:prepare", draft);
+    return draft.message;
+  };
+  assert.equal(prepare(), "Agent finished.");
+  const first = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 0 });
+  const second = await h.call("bash_async", { command: "cat", timeout: 0 });
+  assert.equal(prepare("turn_end"), "Agent finished.");
+  const message = prepare();
+  assert.match(message, /^Agent finished\. Jobs running:/);
+  assert.deepEqual(message.match(/\[[0-9a-z]{2}\]/g)?.sort(), [`[${first.details!.id}]`, `[${second.details!.id}]`].sort());
+  assert.ok(!message.includes("PRIVATE_COMMAND"));
+  await h.call("bash_kill", { id: first.details!.id });
+  assert.equal(prepare(), `Agent finished. Jobs running: [${second.details!.id}].`);
+  let assignments = 0;
+  h.bus.emit("notifications:prepare", { event: "agent_settled", set message(_value: string) { assignments++; } });
+  assert.equal(assignments, 1, "Exactly one preparation hook should contribute");
+  assert.deepEqual(h.events, [], "Preparation must not emit a second notification or require job-change notifications");
+  h.emit("session_shutdown");
+  assert.equal(prepare(), "Agent finished.");
+  h.emit("session_shutdown");
 });

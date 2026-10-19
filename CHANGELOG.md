@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+- Replace the agent-settled notification with live running-job IDs through notifications:prepare, without sending a second notification or requiring job-change notifications to be enabled.
+- Scope the preparation hook to the session lifecycle, exclude finished jobs and command text, and use pi-notifications v0.2.0 as the optional dependency.
+
 ## 0.4.0
 
 - Add opt-in desktop notifications for job starts, completions, input sends and explicit termination, with asyncJobs.notifications modes none (default), started, completed and all.

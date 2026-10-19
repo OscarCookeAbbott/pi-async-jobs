@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.4.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.5.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -68,7 +68,7 @@ Commands work in all modes; the widget requires TUI mode.
 
 ## Optional desktop notifications
 
-Desktop notifications default to **off** and are separate from the agent-facing completion messages, which always remain enabled. `pi-notifications` is declared as an optional Git dependency; its absence or failure never prevents job execution. Load it once as a Pi package; dependency copies are not automatically registered:
+Job-change desktop notifications default to **off** and are separate from the agent-facing completion messages, which always remain enabled. `pi-notifications` is declared as an optional Git dependency; its absence or failure never prevents job execution. Load it once as a Pi package; dependency copies are not automatically registered:
 
 ```sh
 pi install git:github.com/OscarCookeAbbott/pi-notifications
@@ -84,12 +84,18 @@ Configure in Pi settings and `/reload`:
 
 `asyncJobs.notifications` accepts:
 
-- `none` (default): no desktop notifications.
+- `none` (default): no job-change desktop notifications.
 - `started`: job starts only.
 - `completed`: job completions, including failure, timeout, cancellation and unknown status.
 - `all`: starts, completions, input sends and successful explicit termination, including `/jobs kill` and `/jobs kill-all`.
 
 Events are `jobs.started`, `jobs.completed`, `jobs.input` and `jobs.terminated`, emitted through `notifications:notify`. Notification text includes only the job ID and status, never command text, input or log output. An explicit kill can notify both completion and termination because these report distinct changes. Reads, lists, restoration, streaming log writes, failed operations and shutdown cleanup do not notify. `notifications.events` can filter individual events further. Invalid settings warn and disable desktop notifications without affecting job control.
+
+### Agent finished with jobs running
+
+When `pi-notifications` sends its `agent_settled` notification, this extension replaces the default text with `Agent finished. Jobs running: [ab], [cd].` if any jobs are still alive. It uses the synchronous `notifications:prepare` hook, so there is only **one** notification and no dependency on extension registration order. With no running jobs, the default `Agent finished.` is unchanged.
+
+This context is independent of `asyncJobs.notifications`: it works even when job-change notifications are `none`, but never enables a globally disabled or filtered notification. It includes up to ten live job IDs and a count of additional jobs, not potentially sensitive command text. Finished jobs awaiting their completion message are not counted. The hook is removed at session shutdown.
 
 ## State and recovery
 

@@ -94,6 +94,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let refreshTimer: NodeJS.Timeout | undefined;
   let requestWidgetRender: (() => void) | undefined;
   let removeExitHook: (() => void) | undefined;
+  let removeNotificationHook: (() => void) | undefined;
   let notificationMode: NotificationMode = "none";
   const debounceMs = Number(process.env.PI_JOBS_DEBOUNCE_MS ?? 200);
 
@@ -229,6 +230,8 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     stopWidgetRefresh();
     ctxRef = ctx;
+    removeNotificationHook?.();
+    removeNotificationHook = undefined;
     notificationMode = "none";
     try {
       const configured = (pi.getSettings() as { asyncJobs?: { notifications?: unknown } }).asyncJobs?.notifications;
@@ -249,6 +252,16 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       ctx.ui.notify(`Async jobs registry failed to load: ${loadError}`, "error");
     }
     manager.subscribe(enqueue);
+    removeNotificationHook = pi.events.on("notifications:prepare", (value) => {
+      if (typeof value !== "object" || value === null || loadError) return;
+      const draft = value as { event?: unknown; message?: string };
+      if (draft.event !== "agent_settled") return;
+      const running = (manager?.active() ?? []).filter((job) => job.running);
+      if (!running.length) return;
+      const ids = running.slice(0, 10).map(({ id }) => `[${id}]`).join(", ");
+      const remaining = running.length > 10 ? `, +${running.length - 10} more` : "";
+      draft.message = `Agent finished. Jobs running: ${ids}${remaining}.`;
+    });
     const onExit = (): void => manager?.killAllSync();
     process.on("exit", onExit);
     removeExitHook = () => process.removeListener("exit", onExit);
@@ -257,6 +270,8 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", () => {
     notificationMode = "none";
+    removeNotificationHook?.();
+    removeNotificationHook = undefined;
     stopWidgetRefresh();
     manager?.killAllSync();
     removeExitHook?.();
