@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+- Use semantic error colouring for failed completion headers, expanded failure output and failed-process bash_check results, preserving mixed-batch success styling.
+- Retain completed widget rows until Pi consumes the matching completion frame, rather than dropping them when steering is queued. Track unique frame IDs, ignore duplicate/foreign acknowledgements and retain rows after queue failures.
+- Freeze finished-job runtimes while awaiting delivery and keep existing UI output limits.
+
 ## 0.5.1
 
 - Use a colon after `Agent finished` in running-job notification summaries.

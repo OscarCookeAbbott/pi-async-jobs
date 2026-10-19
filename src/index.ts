@@ -1,16 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type ExtensionAPI, type ExtensionContext, type Theme, type ThemeColor, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
-import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type ShellCommand } from "./jobs.ts";
+import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
 
 type NotificationMode = "none" | "started" | "completed" | "all";
 
 const COMPLETION_TAIL_LINES = 20;
+const UI_TRUNCATION_NOTE = "[Details truncated; inspect the log file for full output.]";
 const id = Type.String({ pattern: "^[0-9a-z]{2}$", description: "Two-character job ID" });
 const uiText = (text: string): string => {
   const shown = truncateHead(text, { maxLines: 500, maxBytes: 30000 });
-  return shown.content + (shown.truncated ? "\n[Details truncated; inspect the log file for full output.]" : "");
+  return shown.content + (shown.truncated ? `\n${UI_TRUNCATION_NOTE}` : "");
 };
 function outputPreview(text: string, expanded: boolean, theme: Theme): Component {
   if (expanded) return new Text(text, 0, 0);
@@ -40,6 +42,21 @@ const OUTCOME_COLORS: Record<JobOutcome, ThemeColor> = {
   signal: "warning",
   unknown: "dim",
 };
+
+function completionColor(completion: JobCompletion): ThemeColor {
+  const outcome = jobOutcome(completion);
+  return outcome === "success" ? "toolTitle" : OUTCOME_COLORS[outcome];
+}
+
+function completionHeadingColor(line: string, jobs: CompletionFeedback[], fallback: ThemeColor): ThemeColor {
+  const match = /^Job \[([0-9a-z]{2})\] /.exec(line);
+  if (!match) return fallback;
+  const job = jobs.find(({ completion }) => completion.id === match[1]);
+  if (job) return completionColor(job.completion);
+  if (/^Job \[[0-9a-z]{2}\] failed\b/.test(line)) return "error";
+  if (/^Job \[[0-9a-z]{2}\] (timed out|terminated)\b/.test(line)) return "warning";
+  return "toolTitle";
+}
 
 interface MessageExpansion {
   global: boolean;
@@ -75,8 +92,8 @@ function expandableMessage(message: MessageIdentity, expanded: boolean, build: (
 
 const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { expanded }, theme, context) => {
   const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
-  const metadata = result.details as JobMetadata | undefined;
-  const color = context?.isError ? "error" : "toolOutput";
+  const metadata = result.details as (JobMetadata & { status?: JobStatus }) | undefined;
+  const color = context?.isError || (metadata?.status && jobOutcome(metadata.status) === "failure") ? "error" : "toolOutput";
   const [heading, ...body] = uiText(text).split("\n");
   const component = new Container();
   component.addChild(new Text(theme.fg(color, heading!), 0, 0));
@@ -90,6 +107,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let loadError: string | undefined;
   let ctxRef: ExtensionContext | undefined;
   let pending: JobCompletion[] = [];
+  const pendingBatches = new Map<string, JobCompletion[]>();
   let flushTimer: NodeJS.Timeout | undefined;
   let refreshTimer: NodeJS.Timeout | undefined;
   let requestWidgetRender: (() => void) | undefined;
@@ -147,9 +165,10 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       record: completion.record,
       running: false,
       outcome: jobOutcome(completion),
+      runtimeSeconds: completion.runtimeSeconds,
     }));
     const jobs = [
-      ...active.map(({ id, record, running }) => ({ id, record, running, outcome: jobOutcome({ running }) })),
+      ...active.map(({ id, record, running }) => ({ id, record, running, outcome: jobOutcome({ running }), runtimeSeconds: undefined })),
       ...finished,
     ];
     if (!jobs.length) {
@@ -169,8 +188,8 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
           const now = Math.floor(Date.now() / 1000);
           return [
             heading,
-            ...jobs.slice(0, 6).map(({ id, record, running, outcome }) =>
-              truncateToWidth(theme.fg(OUTCOME_COLORS[outcome], formatJobLine(id, record.command, running, Math.max(0, now - record.start_time), outcome)), width),
+            ...jobs.slice(0, 6).map(({ id, record, running, outcome, runtimeSeconds }) =>
+              truncateToWidth(theme.fg(OUTCOME_COLORS[outcome], formatJobLine(id, record.command, running, runtimeSeconds ?? Math.max(0, now - record.start_time), outcome)), width),
             ),
             ...(jobs.length > 6 ? [truncateToWidth(theme.fg("dim", `+${jobs.length - 6} more`), width)] : []),
           ];
@@ -186,15 +205,21 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   async function flush(): Promise<void> {
     flushTimer = undefined;
-    if (!pending.length) return;
-    const batch = pending;
+    const alreadyQueued = new Set([...pendingBatches.values()].flat());
+    const batch = pending.filter((completion) => !alreadyQueued.has(completion));
+    if (!batch.length) return;
+    const notificationId = randomUUID();
+    pendingBatches.set(notificationId, batch);
     try {
       const jobs = await Promise.all(batch.map(async (completion) => ({ completion, tail: await tailFile(completion.record.log_path, COMPLETION_TAIL_LINES) })));
+      if (!pendingBatches.has(notificationId)) return;
       const content = formatCompletions(jobs);
-      // Steer an active run; start a turn when the agent is idle. Either way the batch is one frame.
-      pi.sendMessage({ customType: "async-jobs-completion", content, display: true, details: { jobs } }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
+      // Queuing is not delivery. message_end acknowledges when Pi consumes this exact frame.
+      pi.sendMessage({ customType: "async-jobs-completion", content, display: true, details: { jobs, notificationId } }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
+    } catch (error) {
+      pendingBatches.delete(notificationId);
+      try { ctxRef?.ui.notify(`Async job completion could not be queued; finished rows retained: ${error instanceof Error ? error.message : String(error)}`, "warning"); } catch { /* Non-interactive delivery does not require UI. */ }
     } finally {
-      pending = pending.filter((completion) => !batch.includes(completion));
       updateWidget();
     }
   }
@@ -206,25 +231,50 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     updateWidget();
   }
 
-  pi.registerMessageRenderer<{ jobs: CompletionFeedback[] }>("async-jobs-completion", (message, { expanded, outputPad }, theme) => {
+  pi.registerMessageRenderer<{ jobs: CompletionFeedback[]; notificationId?: string }>("async-jobs-completion", (message, { expanded, outputPad }, theme) => {
     const content = typeof message.content === "string" ? message.content : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
     return expandableMessage(message, expanded, (showDetails) => {
-      const text = showDetails && message.details?.jobs
-        ? message.details.jobs.map(({ completion, tail }) => `${formatMetadata(jobMetadata(completion.id, completion.record))}\n${formatStatus({ ...completion, running: false, tail })}`).join("\n\n")
-        : content;
+      const jobs = message.details?.jobs ?? [];
+      let overall: ThemeColor = "toolTitle";
+      if (jobs.some(({ completion }) => completionColor(completion) === "error")) overall = "error";
+      else if (jobs.some(({ completion }) => completionColor(completion) === "warning")) overall = "warning";
+      const sections = showDetails && jobs.length
+        ? jobs.map((job) => ({ text: `${formatMetadata(jobMetadata(job.completion.id, job.completion.record))}\n${formatStatus({ ...job.completion, running: false, tail: job.tail })}`, jobs: [job], colour: completionColor(job.completion) }))
+        : [{ text: content, jobs, colour: jobs.length === 1 ? completionColor(jobs[0].completion) : "toolTitle" as ThemeColor }];
+      const shown = truncateHead(sections.map(({ text }) => text).join("\n\n"), { maxLines: 500, maxBytes: 30000 });
       const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
-      let heading = true;
-      const headings: string[] = [];
-      const body: string[] = [];
-      uiText(text).split("\n").forEach((line, index) => {
-        if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
-        if (heading) headings.push(theme.fg("toolTitle", theme.bold(line)));
-        else body.push(theme.fg("customMessageText", line));
+      let offset = 0;
+      sections.forEach((section, sectionIndex) => {
+        const text = shown.content.slice(offset, offset + section.text.length);
+        offset += section.text.length + 2;
+        if (!text) return;
+        let heading = true;
+        const headings: string[] = [];
+        const body: string[] = [];
+        const bodyColour = section.colour === "toolTitle" ? "customMessageText" : section.colour;
+        text.split("\n").forEach((line, index) => {
+          if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
+          if (heading) headings.push(theme.fg(completionHeadingColor(line, section.jobs, overall), theme.bold(line)));
+          else body.push(theme.fg(bodyColour, line));
+        });
+        box.addChild(new Text((sectionIndex ? "\n" : "") + headings.join("\n"), 0, 0));
+        if (body.length) box.addChild(outputPreview(body.join("\n"), showDetails, theme));
       });
-      box.addChild(new Text(headings.join("\n"), 0, 0));
-      if (body.length) box.addChild(outputPreview(body.join("\n"), showDetails, theme));
+      if (shown.truncated) box.addChild(new Text(theme.fg("muted", UI_TRUNCATION_NOTE), 0, 0));
       return box;
     });
+  });
+
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "custom" || message.customType !== "async-jobs-completion") return;
+    const notificationId = (message.details as { notificationId?: unknown } | undefined)?.notificationId;
+    if (typeof notificationId !== "string") return;
+    const batch = pendingBatches.get(notificationId);
+    if (!batch) return;
+    pendingBatches.delete(notificationId);
+    pending = pending.filter((completion) => !batch.includes(completion));
+    updateWidget();
   });
 
   pi.on("session_start", async (_event, ctx) => {
@@ -279,6 +329,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     if (flushTimer) clearTimeout(flushTimer);
     flushTimer = undefined;
     pending = [];
+    pendingBatches.clear();
     manager?.dispose();
     manager = undefined;
     ctxRef = undefined;

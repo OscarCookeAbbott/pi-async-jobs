@@ -8,6 +8,7 @@ import { createEventBus, type ExtensionAPI, type ExtensionContext, type ToolDefi
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import extension from "../src/index.ts";
+import { formatCompletions, jobMetadata } from "../src/format.ts";
 
 type Details = { id: string; logPath: string };
 
@@ -33,6 +34,8 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
   let renderRequests = 0;
   let widgetUpdates = 0;
   let failNotifications = false;
+  let autoDeliver = true;
+  let failMessages = false;
   const ctx = {
     mode: "tui",
     cwd: dir,
@@ -54,7 +57,11 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
       events.push({ name, payload });
       bus.emit(name, payload);
     } },
-    sendMessage: (message: any, options: any) => messages.push({ message, options }),
+    sendMessage: (message: any, options: any) => {
+      if (failMessages) throw new Error("Queue unavailable");
+      messages.push({ message, options });
+      if (autoDeliver) handlers.get("message_end")?.({ message: { role: "custom", ...message } }, ctx);
+    },
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
   return {
@@ -63,6 +70,9 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     get renderRequests() { return renderRequests; },
     get widgetUpdates() { return widgetUpdates; },
     setIdle(value: boolean) { idle = value; },
+    setAutoDeliver(value: boolean) { autoDeliver = value; },
+    failMessages(value = true) { failMessages = value; },
+    deliver(index: number) { emit("message_end", { message: { role: "custom", ...messages[index].message } }); },
     failNotifications() { failNotifications = true; },
     async call(name: string, params: JsonObject) {
       const tool = tools.get(name)!;
@@ -295,7 +305,79 @@ test("running durations redraw once per second without rebuilding widgets or mes
   assert.ok(finished.some((line) => line.includes(id)));
 });
 
-test("finished jobs stay visible with an outcome marker until their notification is sent", async (t) => {
+test("failed completion sections use semantic error colours without colouring successful jobs as failures", () => {
+  const h = harness("/unused");
+  const jobs = ["ab", "cd"].map((id, index) => ({
+    completion: {
+      id, record: { pid: index + 1, pgid: index + 1, command: "example", log_path: `/tmp/${id}.log`, start_time: 0, timeout: 60 },
+      exitCode: index === 0 ? 0 : 2, signal: null, timedOut: false, runtimeSeconds: 1,
+    },
+    tail: { text: index === 0 ? "Success output" : "Failure output", truncated: false },
+  }));
+  const message = { customType: "async-jobs-completion", content: formatCompletions(jobs), details: { jobs } };
+  for (const expanded of [false, true]) {
+    const colours: Array<{ colour: string; text: string }> = [];
+    const theme = {
+      fg: (colour: string, text: string) => { colours.push({ colour, text }); return text; },
+      bg: (_colour: string, text: string) => text, bold: (text: string) => text,
+    };
+    h.renderers.get("async-jobs-completion")!(message, { expanded, outputPad: 0 }, theme).render(200);
+    assert.ok(colours.some(({ colour, text }) => colour === "error" && /^Job \[cd\]/.test(text)), `failed header must be red (expanded=${expanded})`);
+    assert.ok(colours.some(({ colour, text }) => colour !== "error" && /^Job \[ab\]/.test(text)), `successful header must not be red (expanded=${expanded})`);
+    if (expanded) assert.ok(colours.some(({ colour, text }) => colour === "error" && text.includes("Failure output")));
+    colours.length = 0;
+    const failed = jobs[1];
+    (h.tools.get("bash_check")!.renderResult! as Function)({
+      content: [{ type: "text", text: "Failed job status" }],
+      details: { ...jobMetadata(failed.completion.id, failed.completion.record), status: { ...failed.completion, running: false, tail: failed.tail } },
+    }, { expanded }, theme, { isError: false }).render(200);
+    assert.ok(colours.some(({ colour, text }) => colour === "error" && text.includes("Failed job status")));
+  }
+});
+
+test("queued completions stay visible until their matching message reaches the agent", async (t) => {
+  const h = await setup(t);
+  h.setIdle(false);
+  h.setAutoDeliver(false);
+  await h.call("bash_async", { command: "printf 'one\\n'" });
+  await waitUntil(() => h.messages.length === 1);
+  assert.ok(h.widgetLines().some((line) => line.includes("one")), "Queueing must not remove the finished row");
+  assert.equal(h.messages[0].options.deliverAs, "steer");
+  h.emit("message_end", { message: { role: "custom", customType: "async-jobs-completion", details: { notificationId: "unrelated" } } });
+  assert.ok(h.widgetLines().some((line) => line.includes("one")));
+  await h.call("bash_async", { command: "printf 'two\\n'" });
+  await waitUntil(() => h.messages.length === 2);
+  assert.ok(h.widgetLines().some((line) => line.includes("one")));
+  assert.ok(h.widgetLines().some((line) => line.includes("two")));
+  assert.equal(h.messages[1].message.details.jobs.length, 1, "Already queued jobs must not be sent twice");
+  const secondRow = h.widgetLines().find((line) => line.includes("two"));
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  t.mock.timers.tick(60000);
+  h.deliver(0);
+  assert.equal(h.widgetLines().find((line) => line.includes("two")), secondRow, "Finished duration must not grow while waiting for delivery");
+  assert.ok(!h.widgetLines().some((line) => line.includes("one")));
+  assert.ok(h.widgetLines().some((line) => line.includes("two")));
+  h.deliver(0);
+  assert.ok(h.widgetLines().some((line) => line.includes("two")), "Duplicate acknowledgements must not remove a newer completion");
+  h.deliver(1);
+  assert.deepEqual(h.widgetLines(), []);
+});
+
+test("queue failures retain finished jobs for a later delivery attempt", async (t) => {
+  const h = await setup(t);
+  h.failMessages();
+  await h.call("bash_async", { command: "exit 7" });
+  await waitUntil(() => h.notifications.some((text) => text.includes("could not be queued")));
+  assert.equal(h.messages.length, 0);
+  assert.match(h.widgetLines()[0], /1 finished/);
+  h.failMessages(false);
+  await h.call("bash_async", { command: "true" });
+  await waitUntil(() => h.messages.length === 1);
+  assert.equal(h.messages[0].message.details.jobs.length, 2);
+  assert.deepEqual(h.widgetLines(), []);
+});
+
+test("finished jobs retain outcome markers through immediate completion delivery", async (t) => {
   process.env.PI_JOBS_DEBOUNCE_MS = "500";
   t.after(() => delete process.env.PI_JOBS_DEBOUNCE_MS);
   const h = await setup(t);
