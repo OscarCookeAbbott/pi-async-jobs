@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Start a new session or run `/reload`. For a pinned release, append `@v0.5.2` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Start a new session or run `/reload`. For a pinned release, append `@v0.6.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -30,10 +30,14 @@ Each job gets a two-character ID (`00`–`zz`, 1,296 possible values) that is re
 
 | Tool | Arguments | Behaviour |
 | --- | --- | --- |
-| `bash_async` | `command`; optional `timeout` (seconds, default 60, `0` for none) | Spawns a detached process group, writes the registry entry, and starts the log stream. Returns `Job [<id>] started in background.` with guidance to continue independent work or end the turn until notified; PID, process group, full command and log path remain in expanded TUI details |
+| `bash_async` | `command`; optional `timeout` (positive seconds, default 60) and `title` | Spawns a detached process group, writes the registry entry, and starts the log stream. Returns `Job [<id>] started in background.` with guidance to continue independent work or end the turn until notified; PID, process group, full command and log path remain in expanded TUI details |
 | `bash_check` | `id`; optional `tail_lines` (default 50) | Reports `running` or the exit code and returns the last log lines |
 | `bash_send` | `id`, `input` | Writes `input` plus a newline to the process stdin |
 | `bash_kill` | `id` | Sends `SIGINT` to the process group, falling back to `SIGKILL` after a five-second grace period |
+
+Every job has a finite timeout. `0`, negatives, fractions and values above 2,147,483 seconds (Node's timer limit, about 24.8 days) are rejected; omitting `timeout` uses 60 seconds. Legacy saved jobs with `timeout: 0` migrate to a 60-second deadline measured from their original start time, so already-overdue legacy jobs are terminated after reload.
+
+An optional nonblank `title` replaces the command in primary tool headers, widget rows, lists and completion summaries. The command still executes unchanged and remains available in expanded debug metadata. Titles are persisted across reloads; untitled jobs continue to display their command.
 
 The tools run sequentially because they share the on-disk registry. Each command runs under the shell Pi resolves for the built-in bash tool, so it honours `settings.shellPath`; when that path is invalid the extension warns and uses the default shell.
 
@@ -55,16 +59,22 @@ Completions that arrive during an active run or within the debounce window are c
 
 ## Widget and command
 
-Async call headers retain Pi's native bold `$ command` presentation, followed by a muted effective timeout and trailing `[async]` marker, e.g. `(timeout 60s) [async]` or `(no timeout) [async]`. Other job tools use bold names and bold-accented boxed job IDs. Output uses the standard tool-output colour; invocation errors use the error colour. Completion notifications retain Pi's themed message background and configured output padding. Failed job headings and expanded failure sections use the built-in semantic `error` colour; successful jobs keep normal title styling, and timeouts/signals use `warning`. A failed process reported by `bash_check` is also coloured as an error without changing the tool result's success/error semantics. Job output bodies collapse to the last five visual lines (including wrapped long lines), with Pi's configured tool-expansion key hint; status headings remain visible. Clicking a completion notification toggles that notification independently, while the tool-output shortcut still controls all messages together. Expanding reveals retained output and process metadata, subject to the existing UI safety limits. This presentation is TUI-only and never truncates model feedback further.
+Async call headers retain Pi's native bold `$ command` presentation (or `$ title` when supplied), followed by a muted effective timeout and trailing `[async]` marker, e.g. `(timeout 60s) [async]`. Other job tools use bold names and bold-accented boxed job IDs. Output uses the standard tool-output colour; invocation errors use the error colour. Completion notifications retain Pi's themed message background and configured output padding. Successful jobs use the semantic `toolSuccessBg` background and failed jobs use `toolErrorBg`, with normal foreground text, in widgets, status results, full views and both collapsed/expanded completion sections. Mixed batches apply the appropriate background separately to each job. Normal foreground styling is retained; timeouts/signals keep their warning styling. This does not change tool result success/error semantics. Job output bodies collapse to the last five visual lines (including wrapped long lines), with Pi's configured tool-expansion key hint; status headings remain visible. Clicking a completion notification toggles that notification independently, while the tool-output shortcut still controls all messages together. Expanding reveals retained output and process metadata, subject to the existing UI safety limits. This presentation is TUI-only and never truncates model feedback further.
 
 - The widget shows `▶ [ab] 14s command`, with compact clocks (`14s`, `1:02`, `1:02:03`) ahead of command labels so long commands cannot hide the duration. It requests a redraw once per second while jobs run, without rebuilding the widget or sending model messages. Refreshes stop when no jobs are running, and never start in non-interactive modes.
 - Finished jobs remain visible until their completion reaches the agent's context, using their recorded (non-increasing) runtime and distinct outcome markers and colours: `✓` success, `✗` failure, `⏱` timeout, `⚠` signal, and `?` unknown. Queued-but-not-consumed completions count as finished in the heading and remain visible while the agent is busy, then disappear once delivered.
 - Command labels are single-line and stripped of terminal control sequences; each row fits the available terminal width. Multiline commands therefore cannot add unaccounted rows over the editor. The widget is hidden when there are neither running nor unnotified jobs.
-- `/jobs` lists running jobs.
+- `/jobs` opens a snapshot browser of running jobs and finished jobs awaiting delivery. ↑/↓ or Home/End selects; Enter/Space toggles full metadata and the bounded log tail; Page Up/Down scrolls expanded details and Escape closes. Fullscreen mouse row clicks, wheel scrolling and navigation buttons are supported; regular terminals keep native mouse/scrollback behaviour.
 - `/jobs kill <id>` terminates one job.
 - `/jobs kill-all` terminates every running job.
 
 Commands work in all modes; the widget requires TUI mode.
+
+The compact widget keeps at most six rows. Overflow is beside its header counts, e.g. `Jobs · 12 running · Showing 1-6/12`, with no extra footer row.
+
+## Optional overview integration
+
+When `pi-overview` is loaded, jobs publish a count badge and hoverable Jobs section showing running jobs and finished jobs still awaiting agent delivery. Optional titles replace command labels here too; items show outcome/timeout/runtime details without publishing log contents. The contribution disappears after the last job completion is acknowledged. Collection handles either extension load order, including headless sessions, without an overview dependency or changes to tool feedback.
 
 ## Optional desktop notifications
 

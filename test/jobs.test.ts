@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { allocateId, ID_COUNT, JobManager, parseRegistry, tailFile, type JobCompletion, type Registry } from "../src/jobs.ts";
+import { allocateId, DEFAULT_TIMEOUT, ID_COUNT, MAX_TIMEOUT, JobManager, parseRegistry, tailFile, type JobCompletion, type Registry } from "../src/jobs.ts";
 
 async function workspace(t: TestContext): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pi-jobs-test-"));
@@ -42,7 +42,34 @@ test("registry parsing rejects malformed data", () => {
   assert.throws(() => parseRegistry({ ab: { pid: "1" } }), /Invalid registry entry/);
 });
 
-test("tailFile returns the last lines without loading the whole file", async (t) => {
+test("all new jobs require bounded positive timeouts; legacy zero values migrate to the default", async (t) => {
+  const dir = await workspace(t);
+  const manager = new JobManager(dir);
+  t.after(() => manager.dispose());
+  for (const timeout of [0, -1, 0.5, Infinity, NaN, MAX_TIMEOUT + 1]) await assert.rejects(manager.start("true", timeout), /positive integer/);
+  await assert.rejects(manager.start("true", 60, undefined, " "), /title/);
+  assert.deepEqual(manager.active(), []);
+  const legacy = { pid: 1, pgid: 1, command: "old", log_path: "old.log", start_time: 0, timeout: 0 };
+  assert.equal(parseRegistry({ aa: legacy }).aa.timeout, DEFAULT_TIMEOUT);
+  for (const timeout of [-1, MAX_TIMEOUT + 1]) assert.throws(() => parseRegistry({ aa: { ...legacy, timeout } }), /Invalid registry/);
+});
+
+test("restored legacy unlimited jobs are persisted with a finite deadline and expire", { timeout: 5000 }, async (t) => {
+  const dir = await workspace(t);
+  const first = new JobManager(dir);
+  const second = new JobManager(dir);
+  t.after(() => { first.killAllSync(); first.dispose(); second.killAllSync(); second.dispose(); });
+  const { id, record } = await first.start("sleep 30");
+  first.dispose();
+  await writeFile(first.registryPath, JSON.stringify({ [id]: { ...record, timeout: 0, start_time: Math.floor(Date.now() / 1000) - 61 } }));
+  const done = waitCompletion(second);
+  await second.load();
+  assert.equal(second.get(id)?.timeout, DEFAULT_TIMEOUT);
+  assert.equal(JSON.parse(await readFile(second.registryPath, "utf8"))[id].timeout, DEFAULT_TIMEOUT);
+  assert.equal((await done).timedOut, true);
+});
+
+test("tailFile returns the last lines without loading the whole file",  async (t) => {
   const dir = await workspace(t);
   const path = join(dir, "log.txt");
   await writeFile(path, ["one", "two", "three", "four"].join("\n"));
@@ -83,6 +110,7 @@ test("a job streams to disk and reports its exit through a completion event", as
   const done = waitCompletion(manager);
   const { id, record } = await manager.start("printf 'hello\\nworld\\n'");
   assert.equal(record.pgid, record.pid);
+  assert.equal(record.timeout, DEFAULT_TIMEOUT);
   const completion = await done;
   assert.equal(completion.id, id);
   assert.equal(completion.exitCode, 0);

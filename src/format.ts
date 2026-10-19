@@ -5,11 +5,15 @@ import type { JobCompletion, JobRecord, JobStatus, LogTail } from "./jobs.ts";
 
 export const MAX_COMPLETION_BYTES = 16 * 1024;
 export interface CompletionFeedback { completion: JobCompletion; tail: LogTail }
-export interface JobMetadata { id: string; pid: number; pgid: number; command: string; logPath: string }
+export interface JobMetadata { id: string; pid: number; pgid: number; command: string; title?: string; logPath: string }
 
 function commandLabel(command: string): string {
   const characters = Array.from(stripVTControlCharacters(command).replace(/\s+/g, " ").replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim());
   return characters.slice(0, 120).join("") + (characters.length > 120 ? "…" : "");
+}
+
+export function jobLabel(record: Pick<JobRecord, "command" | "title">): string {
+  return commandLabel(record.title ?? record.command);
 }
 
 export type JobOutcome = "running" | "success" | "failure" | "timeout" | "signal" | "unknown";
@@ -46,7 +50,7 @@ function summary(job: JobCompletion | JobStatus): string {
     : job.exitCode === 0 ? "succeeded"
     : job.exitCode === null ? "finished (exit unknown)"
     : `failed (exit ${job.exitCode})`;
-  return `Job [${job.id}] ${status} (${job.runtimeSeconds}s): ${commandLabel(job.record.command)}`;
+  return `Job [${job.id}] ${status} (${job.runtimeSeconds}s): ${jobLabel(job.record)}`;
 }
 
 function output(id: string, tail: LogTail): string {
@@ -85,7 +89,7 @@ export function formatStatus(status: JobStatus): string {
 }
 
 export function formatMetadata(metadata: JobMetadata): string {
-  return `Job [${metadata.id}] · PID ${metadata.pid} · PGID ${metadata.pgid}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
+  return `Job [${metadata.id}] · PID ${metadata.pid} · PGID ${metadata.pgid}${metadata.title ? `\nTitle: ${commandLabel(metadata.title)}` : ""}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
 }
 
 export function formatJobLine(id: string, command: string, running: boolean, runtimeSeconds: number, outcome: JobOutcome = running ? "running" : "unknown"): string {
@@ -98,5 +102,5 @@ export function formatJobLine(id: string, command: string, running: boolean, run
 }
 
 export function jobMetadata(id: string, record: JobRecord): JobMetadata {
-  return { id, pid: record.pid, pgid: record.pgid, command: record.command, logPath: record.log_path };
+  return { id, pid: record.pid, pgid: record.pgid, command: record.command, ...(record.title === undefined ? {} : { title: record.title }), logPath: record.log_path };
 }

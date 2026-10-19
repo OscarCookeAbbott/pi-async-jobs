@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatCompletions, formatJobLine, formatStatus, jobOutcome, MAX_COMPLETION_BYTES, type CompletionFeedback } from "../src/format.ts";
+import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, jobOutcome, MAX_COMPLETION_BYTES, type CompletionFeedback } from "../src/format.ts";
 import type { JobCompletion } from "../src/jobs.ts";
 
 const completion: JobCompletion = {
@@ -31,7 +31,16 @@ test("feedback distinguishes success, failure, timeout, signals, unknown exits a
   assert.equal(formatStatus({ ...completion, running: true, exitCode: null, tail: { text: "", truncated: false } }), "Job [ab] running (14s): npm test");
 });
 
-test("batched notifications bound output without burying later job statuses", () => {
+test("titles replace command summaries while expanded metadata retains the executable command", () => {
+  const titled = { ...completion, record: { ...completion.record, title: "\x1b[31mFriendly\nbuild\x1b[0m" } };
+  const text = formatCompletions([{ completion: titled, tail: { text: "", truncated: false } }]);
+  assert.equal(text, "Job [ab] succeeded (14s): Friendly build");
+  const metadata = formatMetadata(jobMetadata(titled.id, titled.record));
+  assert.match(metadata, /Title: Friendly build/);
+  assert.match(metadata, /Command:\nnpm test/);
+});
+
+test("batched notifications bound output without burying later job statuses",  () => {
   const jobs: CompletionFeedback[] = Array.from({ length: 20 }, (_, i) => ({
     completion: { ...completion, id: i.toString(36).padStart(2, "0"), exitCode: i === 19 ? 1 : 0, record: { ...completion.record, log_path: `/tmp/jobs/${i.toString(36).padStart(2, "0")}.log` } },
     tail: { text: "x".repeat(4096), truncated: false },

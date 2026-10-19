@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type ExtensionAPI, type ExtensionContext, type Theme, type ThemeColor, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
-import { DEFAULT_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
+import { createBrowser } from "./browser.ts";
+import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobLabel, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
+import { DEFAULT_TIMEOUT, MAX_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
 
 type NotificationMode = "none" | "started" | "completed" | "all";
 
@@ -36,16 +37,21 @@ function outputPreview(text: string, expanded: boolean, theme: Theme): Component
 
 const OUTCOME_COLORS: Record<JobOutcome, ThemeColor> = {
   running: "accent",
-  success: "success",
-  failure: "error",
+  success: "toolOutput",
+  failure: "toolOutput",
   timeout: "warning",
   signal: "warning",
   unknown: "dim",
 };
 
+function outcomeBackground(outcome: JobOutcome): "toolSuccessBg" | "toolErrorBg" | undefined {
+  if (outcome === "success") return "toolSuccessBg";
+  if (outcome === "failure") return "toolErrorBg";
+}
+
 function completionColor(completion: JobCompletion): ThemeColor {
   const outcome = jobOutcome(completion);
-  return outcome === "success" ? "toolTitle" : OUTCOME_COLORS[outcome];
+  return outcome === "success" || outcome === "failure" ? "toolTitle" : OUTCOME_COLORS[outcome];
 }
 
 function completionHeadingColor(line: string, jobs: CompletionFeedback[], fallback: ThemeColor): ThemeColor {
@@ -53,7 +59,6 @@ function completionHeadingColor(line: string, jobs: CompletionFeedback[], fallba
   if (!match) return fallback;
   const job = jobs.find(({ completion }) => completion.id === match[1]);
   if (job) return completionColor(job.completion);
-  if (/^Job \[[0-9a-z]{2}\] failed\b/.test(line)) return "error";
   if (/^Job \[[0-9a-z]{2}\] (timed out|terminated)\b/.test(line)) return "warning";
   return "toolTitle";
 }
@@ -93,13 +98,17 @@ function expandableMessage(message: MessageIdentity, expanded: boolean, build: (
 const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { expanded }, theme, context) => {
   const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
   const metadata = result.details as (JobMetadata & { status?: JobStatus }) | undefined;
-  const color = context?.isError || (metadata?.status && jobOutcome(metadata.status) === "failure") ? "error" : "toolOutput";
+  const background = metadata?.status && outcomeBackground(jobOutcome(metadata.status));
+  const color = context?.isError ? "error" : "toolOutput";
   const [heading, ...body] = uiText(text).split("\n");
   const component = new Container();
   component.addChild(new Text(theme.fg(color, heading!), 0, 0));
   if (body.length) component.addChild(outputPreview(theme.fg(color, body.join("\n")), expanded, theme));
   if (expanded && typeof metadata?.command === "string") component.addChild(new Text(theme.fg("muted", uiText(formatMetadata(metadata))), 0, 0));
-  return component;
+  if (!background) return component;
+  const box = new Box(0, 0, (line) => theme.bg(background, line));
+  box.addChild(component);
+  return box;
 };
 
 export default function asyncJobsExtension(pi: ExtensionAPI): void {
@@ -113,6 +122,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let requestWidgetRender: (() => void) | undefined;
   let removeExitHook: (() => void) | undefined;
   let removeNotificationHook: (() => void) | undefined;
+  let removeOverviewHook: (() => void) | undefined;
   let notificationMode: NotificationMode = "none";
   const debounceMs = Number(process.env.PI_JOBS_DEBOUNCE_MS ?? 200);
 
@@ -153,7 +163,26 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     requestWidgetRender = undefined;
   }
 
+  function publishOverview(): void {
+    if (!ctxRef) return;
+    try {
+      const active = loadError ? [] : manager?.active() ?? [];
+      const states: Record<JobOutcome, string> = { running: "running", success: "complete", failure: "failed", timeout: "failed", signal: "cancelled", unknown: "unknown" };
+      const items = [
+        ...active.map(({ id, record, running }) => ({ title: `[${id}] ${jobLabel(record)}`, state: running ? "running" : "unknown", detail: `${running ? "Running" : "Finishing"} · timeout ${record.timeout}s` })),
+        ...pending.map((completion) => ({ title: `[${completion.id}] ${jobLabel(completion.record)}`, state: states[jobOutcome(completion)], detail: `${jobOutcome(completion)} · ${completion.runtimeSeconds}s · awaiting agent delivery` })),
+      ];
+      if (!items.length) { pi.events.emit("overview:remove", "jobs"); return; }
+      pi.events.emit("overview:publish", { id: "jobs", badge: `${items.length} ${items.length === 1 ? "job" : "jobs"}`, sections: [{ title: "Jobs", items }] });
+    } catch { /* Overview is optional and must not affect jobs. */ }
+  }
+  function subscribeOverview(): void {
+    if (!removeOverviewHook) removeOverviewHook = pi.events.on("overview:collect", publishOverview);
+  }
+  subscribeOverview();
+
   function updateWidget(): void {
+    publishOverview();
     const ctx = ctxRef;
     if (!ctx || ctx.mode !== "tui") {
       stopWidgetRefresh();
@@ -179,7 +208,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     const runningCount = jobs.filter(({ running }) => running).length;
     const finishedCount = jobs.length - runningCount;
     if (!runningCount) stopWidgetRefresh();
-    const headingText = ["Jobs", runningCount ? `${runningCount} running` : "", finishedCount ? `${finishedCount} finished` : ""].filter(Boolean).join(" · ");
+    const headingText = ["Jobs", runningCount ? `${runningCount} running` : "", finishedCount ? `${finishedCount} finished` : "", jobs.length > 6 ? `Showing 1-6/${jobs.length}` : ""].filter(Boolean).join(" · ");
     ctx.ui.setWidget("async-jobs", (tui, theme) => {
       requestWidgetRender = () => tui.requestRender();
       return {
@@ -188,10 +217,11 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
           const now = Math.floor(Date.now() / 1000);
           return [
             heading,
-            ...jobs.slice(0, 6).map(({ id, record, running, outcome, runtimeSeconds }) =>
-              truncateToWidth(theme.fg(OUTCOME_COLORS[outcome], formatJobLine(id, record.command, running, runtimeSeconds ?? Math.max(0, now - record.start_time), outcome)), width),
-            ),
-            ...(jobs.length > 6 ? [truncateToWidth(theme.fg("dim", `+${jobs.length - 6} more`), width)] : []),
+            ...jobs.slice(0, 6).map(({ id, record, running, outcome, runtimeSeconds }) => {
+              const row = truncateToWidth(theme.fg(OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, running, runtimeSeconds ?? Math.max(0, now - record.start_time), outcome)), width);
+              const background = outcomeBackground(outcome);
+              return background ? theme.bg(background, truncateToWidth(row, width, undefined, true)) : row;
+            }),
           ];
         },
         invalidate() {},
@@ -225,7 +255,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   }
 
   function enqueue(completion: JobCompletion): void {
-    notifyChange("completed", `Job [${completion.id}] finished: ${jobOutcome(completion)}.`);
+    notifyChange("completed", `Job [${completion.id}] finished: ${jobOutcome(completion)}.${completion.record.title ? ` ${completion.record.title}` : ""}`);
     pending.push(completion);
     if (!flushTimer) flushTimer = setTimeout(() => void flush().catch(() => {}), Number.isFinite(debounceMs) ? debounceMs : 200);
     updateWidget();
@@ -235,16 +265,20 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     const content = typeof message.content === "string" ? message.content : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
     return expandableMessage(message, expanded, (showDetails) => {
       const jobs = message.details?.jobs ?? [];
-      let overall: ThemeColor = "toolTitle";
-      if (jobs.some(({ completion }) => completionColor(completion) === "error")) overall = "error";
-      else if (jobs.some(({ completion }) => completionColor(completion) === "warning")) overall = "warning";
-      const sections = showDetails && jobs.length
-        ? jobs.map((job) => ({ text: `${formatMetadata(jobMetadata(job.completion.id, job.completion.record))}\n${formatStatus({ ...job.completion, running: false, tail: job.tail })}`, jobs: [job], colour: completionColor(job.completion) }))
-        : [{ text: content, jobs, colour: jobs.length === 1 ? completionColor(jobs[0].completion) : "toolTitle" as ThemeColor }];
+      let fallbackOutcome: JobOutcome = "unknown";
+      if (/^Job \[[0-9a-z]{2}\] failed\b/m.test(content)) fallbackOutcome = "failure";
+      else if (/^Job \[[0-9a-z]{2}\] succeeded\b/m.test(content)) fallbackOutcome = "success";
+      const sections = jobs.length
+        ? jobs.map((job) => ({
+          text: showDetails ? `${formatMetadata(jobMetadata(job.completion.id, job.completion.record))}\n${formatStatus({ ...job.completion, running: false, tail: job.tail })}` : formatCompletions([job]),
+          jobs: [job], colour: completionColor(job.completion), background: outcomeBackground(jobOutcome(job.completion)),
+        }))
+        : [{ text: content, jobs, colour: "toolTitle" as ThemeColor, background: outcomeBackground(fallbackOutcome) }];
       const shown = truncateHead(sections.map(({ text }) => text).join("\n\n"), { maxLines: 500, maxBytes: 30000 });
-      const box = new Box(outputPad ?? 1, 1, (line) => theme.bg("customMessageBg", line));
+      const container = new Container();
       let offset = 0;
-      sections.forEach((section, sectionIndex) => {
+      sections.forEach((section) => {
+        const box = new Box(outputPad ?? 1, 1, (line) => theme.bg(section.background ?? "customMessageBg", line));
         const text = shown.content.slice(offset, offset + section.text.length);
         offset += section.text.length + 2;
         if (!text) return;
@@ -254,14 +288,15 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
         const bodyColour = section.colour === "toolTitle" ? "customMessageText" : section.colour;
         text.split("\n").forEach((line, index) => {
           if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
-          if (heading) headings.push(theme.fg(completionHeadingColor(line, section.jobs, overall), theme.bold(line)));
+          if (heading) headings.push(theme.fg(completionHeadingColor(line, section.jobs, section.colour), theme.bold(line)));
           else body.push(theme.fg(bodyColour, line));
         });
-        box.addChild(new Text((sectionIndex ? "\n" : "") + headings.join("\n"), 0, 0));
+        box.addChild(new Text(headings.join("\n"), 0, 0));
         if (body.length) box.addChild(outputPreview(body.join("\n"), showDetails, theme));
+        container.addChild(box);
       });
-      if (shown.truncated) box.addChild(new Text(theme.fg("muted", UI_TRUNCATION_NOTE), 0, 0));
-      return box;
+      if (shown.truncated) container.addChild(new Text(theme.fg("muted", UI_TRUNCATION_NOTE), 0, 0));
+      return container;
     });
   });
 
@@ -280,6 +315,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     stopWidgetRefresh();
     ctxRef = ctx;
+    subscribeOverview();
     removeNotificationHook?.();
     removeNotificationHook = undefined;
     notificationMode = "none";
@@ -320,6 +356,8 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", () => {
     notificationMode = "none";
+    removeOverviewHook?.();
+    removeOverviewHook = undefined;
     removeNotificationHook?.();
     removeNotificationHook = undefined;
     stopWidgetRefresh();
@@ -338,7 +376,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bash_async",
     label: "Async Bash",
-    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Use timeout 0 for no limit.",
+    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Every job requires a finite positive timeout; the default is 60 seconds.",
     promptSnippet: "Run lengthy commands without blocking the agent, with automatic completion notifications.",
     promptGuidelines: [
       "Use bash_async for lengthy commands such as builds, test suites, and servers; reserve bash for quick commands. After starting a job, continue independent work or end your turn. Do not poll for completion; a completion message arrives automatically.",
@@ -346,14 +384,15 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     ],
     parameters: Type.Object({
       command: Type.String({ minLength: 1, description: "Shell command to execute." }),
-      timeout: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum execution time in seconds; 0 means unconstrained. Defaults to 60." })),
+      timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT, description: "Maximum execution time in seconds; must be positive. Defaults to 60." })),
+      title: Type.Optional(Type.String({ minLength: 1, description: "Optional display title instead of the command in job labels." })),
     }, { additionalProperties: false }),
     executionMode: "sequential",
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd);
+      const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd, params.title);
       updateWidget();
-      notifyChange("started", `Job [${jobId}] started.`);
+      notifyChange("started", `Job [${jobId}] started.${record.title ? ` ${record.title}` : ""}`);
       return {
         content: [{ type: "text", text: `Job [${jobId}] started in background. Continue independent work, or end your turn; completion will notify you automatically.` }],
         details: jobMetadata(jobId, record),
@@ -361,8 +400,9 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     },
     renderCall(args, theme) {
       const timeout = args.timeout ?? DEFAULT_TIMEOUT;
-      const suffix = timeout === 0 ? "no timeout" : `timeout ${timeout}s`;
-      return new Text(theme.fg("toolTitle", theme.bold(`$ ${args.command ?? "..."}`)) + theme.fg("muted", ` (${suffix}) [async]`), 0, 0);
+      const suffix = `timeout ${timeout}s`;
+      const label = args.title ? jobLabel({ title: args.title, command: "" }) : args.command ?? "...";
+      return new Text(theme.fg("toolTitle", theme.bold(`$ ${label}`)) + theme.fg("muted", ` (${suffix}) [async]`), 0, 0);
     },
     renderResult,
   });
@@ -440,7 +480,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("jobs", {
-    description: "List background jobs, /jobs kill <id>, or /jobs kill-all",
+    description: "Browse and expand background jobs, /jobs kill <id>, or /jobs kill-all",
     getArgumentCompletions(prefix) {
       const values = ["kill-all", ...(manager?.active() ?? []).flatMap(({ id }) => [id, `kill ${id}`])];
       return values.flatMap((value) => value.startsWith(prefix) ? [{ value, label: value }] : []);
@@ -478,7 +518,25 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
         return;
       }
       const active = manager?.active() ?? [];
-      ctx.ui.notify(active.length ? active.map(({ id, record, running }) => formatJobLine(id, record.command, running, Math.max(0, Math.floor(Date.now() / 1000) - record.start_time))).join("\n") : "No background jobs.", "info");
+      const items = await Promise.all([
+        ...active.map(async ({ id, record, running }) => {
+          let detail = formatMetadata(jobMetadata(id, record));
+          try { detail += `\n\n${formatStatus(await requireManager().check(id))}`; }
+          catch (error) { detail += `\nStatus unavailable: ${error instanceof Error ? error.message : String(error)}`; }
+          return { title: formatJobLine(id, record.title ?? record.command, running, Math.max(0, Math.floor(Date.now() / 1000) - record.start_time)), detail };
+        }),
+        ...pending.map(async (completion) => ({
+          title: formatJobLine(completion.id, completion.record.title ?? completion.record.command, false, completion.runtimeSeconds, jobOutcome(completion)),
+          detail: `${formatMetadata(jobMetadata(completion.id, completion.record))}\n\n${formatStatus({ ...completion, running: false, tail: await tailFile(completion.record.log_path, TAIL_LINES) })}\nAwaiting agent delivery.`,
+          color: OUTCOME_COLORS[jobOutcome(completion)],
+          background: outcomeBackground(jobOutcome(completion)),
+        })),
+      ]);
+      if (ctx.mode !== "tui") { ctx.ui.notify(items.map((item) => item.title).join("\n") || "No background jobs.", "info"); return; }
+      await ctx.ui.custom<void>((tui, theme, _keys, done) => createBrowser({
+        title: "Jobs", items, theme, height: () => Math.max(1, tui.terminal.rows - 6),
+        requestRender: () => tui.requestRender(), done,
+      }));
     },
   });
 }

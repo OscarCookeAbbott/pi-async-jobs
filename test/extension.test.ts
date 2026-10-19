@@ -10,7 +10,8 @@ import type { TSchema } from "typebox";
 import extension from "../src/index.ts";
 import { formatCompletions, jobMetadata } from "../src/format.ts";
 
-type Details = { id: string; logPath: string };
+type Details = { id: string; logPath: string; title?: string; command?: string };
+type OverviewData = { id: string; badge: string; sections: Array<{ title: string; items: Array<{ title: string; state: string; detail?: string }> }> };
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -23,12 +24,14 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
 function harness(dir: string, settings: Record<string, unknown> = {}) {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
   const bus = createEventBus();
+  const overview = new Map<string, OverviewData>();
   const tools = new Map<string, ToolDefinition<TSchema, Details>>();
   const messages: Array<{ message: any; options: any }> = [];
   const renderers = new Map<string, Function>();
   const notifications: string[] = [];
   const events: Array<{ name: string; payload: { event: string; title: string; message: string } }> = [];
   const widgets = new Map<string, any>();
+  const views: string[][] = [];
   let command: any;
   let idle = true;
   let renderRequests = 0;
@@ -44,6 +47,13 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     ui: {
       setWidget: (key: string, content: unknown) => { widgetUpdates++; widgets.set(key, content); },
       notify: (text: string) => notifications.push(text),
+      custom: async (factory: Function) => {
+        const view = factory({ terminal: { rows: 12 }, requestRender() {} }, { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text }, {}, () => {});
+        views.push(view.render(80));
+        view.handleInput("\r");
+        views.push(view.render(200));
+        view.handleInput("\x1b");
+      },
     },
   } as unknown as ExtensionContext;
   extension({
@@ -52,9 +62,13 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     registerCommand: (_name: string, definition: any) => { command = definition; },
     registerMessageRenderer: (name: string, renderer: Function) => renderers.set(name, renderer),
     getSettings: () => settings,
-    events: { on: bus.on, emit: (name: string, payload: { event: string; title: string; message: string }) => {
-      if (failNotifications) throw new Error("Notification listener unavailable");
-      events.push({ name, payload });
+    events: { on: bus.on, emit: (name: string, payload: unknown) => {
+      if (name === "notifications:notify") {
+        if (failNotifications) throw new Error("Notification listener unavailable");
+        events.push({ name, payload: payload as { event: string; title: string; message: string } });
+      }
+      if (name === "overview:publish") { const value = payload as OverviewData; overview.set(value.id, value); }
+      if (name === "overview:remove") overview.delete(payload as string);
       bus.emit(name, payload);
     } },
     sendMessage: (message: any, options: any) => {
@@ -65,7 +79,7 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
   return {
-    dir, tools, messages, renderers, notifications, events, widgets, ctx, emit, bus,
+    dir, tools, messages, renderers, notifications, events, widgets, ctx, emit, bus, overview, views,
     get command() { return command; },
     get renderRequests() { return renderRequests; },
     get widgetUpdates() { return widgetUpdates; },
@@ -82,9 +96,9 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     text(result: { content: Array<{ type: string; text?: string }> }): string {
       return result.content.flatMap((item) => item.type === "text" ? [item.text ?? ""] : []).join("\n");
     },
-    widgetLines(width = 80, theme: { fg: (color: string, text: string) => string } = { fg: (_color, text) => text }): string[] {
+    widgetLines(width = 80, theme: { fg: (color: string, text: string) => string; bg?: (color: string, text: string) => string } = { fg: (_color, text) => text }): string[] {
       const factory = widgets.get("async-jobs");
-      return factory ? factory({ requestRender: () => { renderRequests++; } }, theme).render(width) : [];
+      return factory ? factory({ requestRender: () => { renderRequests++; } }, { bg: (_color: string, text: string) => text, ...theme }).render(width) : [];
     },
   };
 }
@@ -111,15 +125,49 @@ test("registers the four background tools and validates their arguments", async 
   assert.match(tool.promptGuidelines!.join("\n"), /reserve bash for quick commands/);
   assert.match(tool.promptGuidelines!.join("\n"), /continue independent work or end your turn/);
   await assert.rejects(h.call("bash_async", { command: "" }), /validation|minimum/i);
+  await assert.rejects(h.call("bash_async", { command: "true", timeout: 0 }), /validation|minimum/i);
+  await assert.rejects(h.call("bash_async", { command: "true", title: " " }), /title/);
   await assert.rejects(h.call("bash_check", { id: "!!" }), /validation|pattern/i);
   await assert.rejects(h.call("bash_check", { id: "zz" }), /Unknown job/);
 });
 
-test("async call headers use the built-in shell style and show the effective timeout", () => {
+test("optional job titles replace primary command labels without changing execution or debug metadata", async (t) => {
+  const h = await setup(t);
+  h.setAutoDeliver(false);
+  const started = await h.call("bash_async", { command: "printf 'real output'", title: "Friendly build" });
+  const id = started.details!.id;
+  assert.equal(started.details!.title, "Friendly build");
+  await waitUntil(() => h.messages.length === 1);
+  assert.match(h.messages[0].message.content, /Friendly build/);
+  assert.ok(!h.messages[0].message.content.includes("printf"));
+  assert.match(h.messages[0].message.content, /real output/);
+  assert.ok(h.widgetLines().some((line) => line.includes("Friendly build") && !line.includes("printf")));
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const header = (h.tools.get("bash_async")!.renderCall! as Function)({ command: "PRIVATE_COMMAND", title: "Friendly build" }, theme, {}).render(200).join("\n");
+  assert.match(header, /Friendly build/);
+  assert.ok(!header.includes("PRIVATE_COMMAND"));
+  assert.equal(started.details!.command, "printf 'real output'");
+  assert.equal(h.overview.get("jobs")?.badge, "1 job");
+  const item = h.overview.get("jobs")!.sections[0].items[0];
+  assert.ok(item.title.includes("Friendly build") && !item.title.includes("printf"));
+  assert.equal(item.state, "complete");
+  assert.match(item.detail!, /awaiting agent delivery/);
+  h.bus.emit("overview:collect", undefined);
+  assert.equal(h.overview.get("jobs")?.sections[0].items[0].title, item.title);
+  await h.command.handler("", h.ctx);
+  assert.match(h.views[0].join("\n"), /Friendly build/);
+  assert.match(h.views[1].join("\n"), /printf/);
+  h.deliver(0);
+  assert.equal(h.overview.has("jobs"), false);
+  assert.deepEqual(h.widgetLines(), []);
+  assert.ok(h.messages[0].message.details.jobs.some(({ completion }: { completion: { id: string } }) => completion.id === id));
+});
+
+test("async call headers use the built-in shell style and show the effective timeout",  () => {
   const h = harness("/unused");
   const theme = { fg: (color: string, text: string) => `<${color}>${text}</${color}>`, bold: (text: string) => `<bold>${text}</bold>` };
   const render = h.tools.get("bash_async")!.renderCall! as Function;
-  for (const [timeout, suffix] of [[undefined, "timeout 60s"], [120, "timeout 120s"], [0, "no timeout"]] as const) {
+  for (const [timeout, suffix] of [[undefined, "timeout 60s"], [120, "timeout 120s"]] as const) {
     const text = render({ command: "echo hi", timeout }, theme, {}).render(200).join("\n").trimEnd();
     assert.equal(text, `<toolTitle><bold>$ echo hi</bold></toolTitle><muted> (${suffix}) [async]</muted>`);
   }
@@ -149,7 +197,7 @@ test("completion notifications retain themed backgrounds and configured padding"
     };
     const lines: string[] = h.renderers.get("async-jobs-completion")!({ content: "Job [ab] succeeded." }, { expanded: false, outputPad }, theme).render(80);
     assert.ok(lines.includes(" ".repeat(outputPad) + "Job [ab] succeeded." + " ".repeat(80 - outputPad - "Job [ab] succeeded.".length)));
-    assert.ok(backgrounds.length > 0 && backgrounds.every((color) => color === "customMessageBg"));
+    assert.ok(backgrounds.length > 0 && backgrounds.every((color) => color === "toolSuccessBg"));
     assert.deepEqual(foregrounds, ["toolTitle"]);
     assert.ok(lines.every((line) => visibleWidth(line) <= 80));
   }
@@ -249,9 +297,19 @@ test("completions from concurrent jobs are collapsed and steer an active run", a
   assert.ok(h.messages[0].message.content.includes(second.details!.id));
 });
 
+test("job overflow is shown beside counts in the header rather than a footer", async (t) => {
+  const h = await setup(t);
+  for (let i = 0; i < 7; i++) await h.call("bash_async", { command: "cat", timeout: 120, title: `Job ${i}` });
+  const lines = h.widgetLines(100);
+  assert.equal(lines[0], "Jobs · 7 running · Showing 1-6/7");
+  assert.equal(lines.length, 7);
+  assert.ok(lines.slice(1).every((line) => !line.includes("more") && !line.includes("Showing")));
+  await h.command.handler("kill-all", h.ctx);
+});
+
 test("running jobs appear in the widget and can be inspected, fed, and killed", async (t) => {
   const h = await setup(t);
-  const started = await h.call("bash_async", { command: "cat", timeout: 0 });
+  const started = await h.call("bash_async", { command: "cat", timeout: 120 });
   const { id } = started.details!;
   await waitUntil(() => h.widgetLines().length > 0);
   assert.ok(h.widgetLines().some((line) => line.includes(id)));
@@ -266,7 +324,9 @@ test("running jobs appear in the widget and can be inspected, fed, and killed", 
   }
   assert.match(tail, /ping/);
   await h.command.handler("", h.ctx);
-  assert.ok(h.notifications.at(-1)!.includes(id));
+  assert.ok(h.views[0].join("\n").includes(id));
+  assert.match(h.views[1].join("\n"), /PID.*PGID/);
+  assert.match(h.views[1].join("\n"), /Command:/);
   assert.equal(h.text(await h.call("bash_kill", { id })), `Job [${id}] terminated.`);
   const finished = h.widgetLines();
   assert.match(finished[0]!, /1 finished/);
@@ -278,7 +338,7 @@ test("running jobs appear in the widget and can be inspected, fed, and killed", 
 test("running durations redraw once per second without rebuilding widgets or messaging the agent", async (t) => {
   const h = await setup(t);
   t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
-  const started = await h.call("bash_async", { command: "cat\n# " + "💜".repeat(80) + "\t\r", timeout: 0 });
+  const started = await h.call("bash_async", { command: "cat\n# " + "💜".repeat(80) + "\t\r", timeout: 120 });
   const { id } = started.details!;
   const factory = h.widgets.get("async-jobs");
   assert.match(h.widgetLines(24)[1], /0s/);
@@ -305,7 +365,7 @@ test("running durations redraw once per second without rebuilding widgets or mes
   assert.ok(finished.some((line) => line.includes(id)));
 });
 
-test("failed completion sections use semantic error colours without colouring successful jobs as failures", () => {
+test("successful and failed jobs use distinct semantic backgrounds with normal text", () => {
   const h = harness("/unused");
   const jobs = ["ab", "cd"].map((id, index) => ({
     completion: {
@@ -317,21 +377,33 @@ test("failed completion sections use semantic error colours without colouring su
   const message = { customType: "async-jobs-completion", content: formatCompletions(jobs), details: { jobs } };
   for (const expanded of [false, true]) {
     const colours: Array<{ colour: string; text: string }> = [];
+    const backgrounds: Array<{ colour: string; text: string }> = [];
     const theme = {
       fg: (colour: string, text: string) => { colours.push({ colour, text }); return text; },
-      bg: (_colour: string, text: string) => text, bold: (text: string) => text,
+      bg: (colour: string, text: string) => { backgrounds.push({ colour, text }); return text; }, bold: (text: string) => text,
     };
     h.renderers.get("async-jobs-completion")!(message, { expanded, outputPad: 0 }, theme).render(200);
-    assert.ok(colours.some(({ colour, text }) => colour === "error" && /^Job \[cd\]/.test(text)), `failed header must be red (expanded=${expanded})`);
-    assert.ok(colours.some(({ colour, text }) => colour !== "error" && /^Job \[ab\]/.test(text)), `successful header must not be red (expanded=${expanded})`);
-    if (expanded) assert.ok(colours.some(({ colour, text }) => colour === "error" && text.includes("Failure output")));
+    assert.ok(colours.every(({ colour }) => colour !== "error"), `failure text must remain normal (expanded=${expanded})`);
+    assert.ok(backgrounds.some(({ colour, text }) => colour === "toolErrorBg" && text.includes("Job [cd]")));
+    assert.ok(backgrounds.some(({ colour, text }) => colour === "toolSuccessBg" && text.includes("Job [ab]")));
+    assert.ok(!backgrounds.some(({ colour, text }) => colour === "toolErrorBg" && text.includes("Job [ab]")));
     colours.length = 0;
+    backgrounds.length = 0;
     const failed = jobs[1];
     (h.tools.get("bash_check")!.renderResult! as Function)({
       content: [{ type: "text", text: "Failed job status" }],
       details: { ...jobMetadata(failed.completion.id, failed.completion.record), status: { ...failed.completion, running: false, tail: failed.tail } },
     }, { expanded }, theme, { isError: false }).render(200);
-    assert.ok(colours.some(({ colour, text }) => colour === "error" && text.includes("Failed job status")));
+    assert.ok(colours.every(({ colour }) => colour !== "error"));
+    assert.ok(backgrounds.some(({ colour, text }) => colour === "toolErrorBg" && text.includes("Failed job status")));
+    backgrounds.length = 0;
+    const success = jobs[0];
+    (h.tools.get("bash_check")!.renderResult! as Function)({
+      content: [{ type: "text", text: "Successful job status" }],
+      details: { ...jobMetadata(success.completion.id, success.completion.record), status: { ...success.completion, running: false, tail: success.tail } },
+    }, { expanded }, theme, { isError: false }).render(200);
+    assert.ok(backgrounds.some(({ colour, text }) => colour === "toolSuccessBg" && text.includes("Successful job status")));
+    assert.ok(colours.every(({ colour }) => colour !== "error" && colour !== "success"));
   }
 });
 
@@ -385,12 +457,15 @@ test("finished jobs retain outcome markers through immediate completion delivery
   const { id } = started.details!;
   await waitUntil(() => h.widgetLines().some((line) => /1 finished/.test(line)));
   const colors: string[] = [];
+  const backgrounds: string[] = [];
   const finished = h.widgetLines(80, {
     fg: (color, text) => { colors.push(color); return text; },
+    bg: (color, text) => { backgrounds.push(color); return text; },
   });
   assert.match(finished[0]!, /1 finished/);
   assert.match(finished[1]!, new RegExp(`✗ \\[${id}\\] `));
-  assert.ok(colors.includes("muted") && colors.includes("error"));
+  assert.ok(colors.includes("muted") && !colors.includes("error"));
+  assert.ok(backgrounds.includes("toolErrorBg"));
   assert.equal(h.messages.length, 0);
   await waitUntil(() => h.messages.length === 1);
   assert.deepEqual(h.widgetLines(), []);
@@ -400,7 +475,7 @@ test("non-interactive jobs do not start UI refreshes", async (t) => {
   const h = await setup(t);
   Reflect.set(h.ctx, "mode", "print");
   t.mock.timers.enable({ apis: ["setInterval"] });
-  const started = await h.call("bash_async", { command: "cat", timeout: 0 });
+  const started = await h.call("bash_async", { command: "cat", timeout: 120 });
   t.mock.timers.tick(2000);
   assert.equal(h.renderRequests, 0);
   assert.deepEqual(h.widgetLines(), []);
@@ -464,7 +539,7 @@ test("desktop notifications default off and filter job changes without exposing 
   for (const mode of [undefined, "none", "started", "completed", "all", "invalid", true, null]) {
     await t.test(`mode ${mode}`, async (t) => {
       const h = await setup(t, { configure: async () => mode === undefined ? {} : { asyncJobs: { notifications: mode } } });
-      const started = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 0 });
+      const started = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 120 });
       const id = started.details!.id;
       await h.call("bash_send", { id, input: "PRIVATE_INPUT" });
       await h.call("bash_check", { id });
@@ -485,14 +560,14 @@ test("desktop notifications default off and filter job changes without exposing 
 
 test("command-based kills notify and broken optional consumers never affect job control", async (t) => {
   const h = await setup(t, { configure: async () => ({ asyncJobs: { notifications: "all" } }) });
-  const first = await h.call("bash_async", { command: "cat", timeout: 0 });
+  const first = await h.call("bash_async", { command: "cat", timeout: 120 });
   await h.command.handler(`kill ${first.details!.id}`, h.ctx);
-  const second = await h.call("bash_async", { command: "cat", timeout: 0 });
+  const second = await h.call("bash_async", { command: "cat", timeout: 120 });
   await h.command.handler("kill-all", h.ctx);
   assert.equal(h.events.filter(({ payload }) => payload.event === "jobs.terminated").length, 2);
   assert.ok(h.events.some(({ payload }) => payload.event === "jobs.completed" && payload.message.includes(second.details!.id)));
   h.failNotifications();
-  const third = await h.call("bash_async", { command: "cat", timeout: 0 });
+  const third = await h.call("bash_async", { command: "cat", timeout: 120 });
   await h.call("bash_send", { id: third.details!.id, input: "hi" });
   await h.call("bash_kill", { id: third.details!.id });
   await waitUntil(() => h.messages.some(({ message }) => message.details.jobs.some(({ completion }: { completion: { id: string } }) => completion.id === third.details!.id)));
@@ -506,8 +581,8 @@ test("settled preparation replaces the default only while jobs run, even with jo
     return draft.message;
   };
   assert.equal(prepare(), "Agent finished:");
-  const first = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 0 });
-  const second = await h.call("bash_async", { command: "cat", timeout: 0 });
+  const first = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 120 });
+  const second = await h.call("bash_async", { command: "cat", timeout: 120 });
   assert.equal(prepare("turn_end"), "Agent finished:");
   const message = prepare();
   assert.match(message, /^Agent finished: Jobs running:/);

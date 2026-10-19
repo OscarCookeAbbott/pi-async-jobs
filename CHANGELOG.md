@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- Require finite positive timeouts (default 60 seconds), bounded to Node's timer range; migrate legacy unlimited jobs to original-start-time 60-second deadlines.
+- Add optional persisted titles replacing command labels while retaining original commands in expanded metadata.
+- Add selectable `/jobs` views with Enter/Space expansion, full metadata/bounded log tails, paging and fullscreen mouse/navigation buttons; put compact overflow beside header counts.
+- Use semantic error/success backgrounds, not red/green foreground text, for finished jobs; style each job independently in mixed batches.
+- Publish optional per-instance overview counts and job rows, retaining finished jobs until their matching agent-delivery acknowledgement.
+
 ## 0.5.2
 
 - Use semantic error colouring for failed completion headers, expanded failure output and failed-process bash_check results, preserving mixed-batch success styling.

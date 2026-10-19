@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const DEFAULT_TIMEOUT = 60;
+export const MAX_TIMEOUT = Math.floor(2147483647 / 1000);
 export const MAX_LOG_BYTES = 10 * 1024 * 1024;
 export const TAIL_LINES = 50;
 export const MAX_TAIL_BYTES = 4096;
@@ -17,6 +18,7 @@ export interface JobRecord {
   pid: number;
   pgid: number;
   command: string;
+  title?: string;
   log_path: string;
   start_time: number;
   timeout: number;
@@ -96,12 +98,14 @@ export function parseRegistry(value: unknown): Registry {
   const registry: Registry = {};
   for (const [id, entry] of Object.entries(value as Record<string, unknown>)) {
     if (!/^[0-9a-z]{2}$/.test(id)) throw new Error(`Invalid job ID ${id} in registry.`);
+    if (typeof entry !== "object" || entry === null) throw new Error(`Invalid registry entry for job ${id}.`);
     const record = entry as Partial<JobRecord>;
     if (
       typeof record.pid !== "number" || !Number.isInteger(record.pid) || record.pid <= 0 ||
       typeof record.pgid !== "number" || typeof record.command !== "string" ||
       typeof record.log_path !== "string" || typeof record.start_time !== "number" ||
-      typeof record.timeout !== "number"
+      typeof record.timeout !== "number" || !Number.isSafeInteger(record.timeout) || record.timeout < 0 || record.timeout > MAX_TIMEOUT ||
+      (record.title !== undefined && (typeof record.title !== "string" || !record.title.trim()))
     ) {
       throw new Error(`Invalid registry entry for job ${id}.`);
     }
@@ -109,9 +113,10 @@ export function parseRegistry(value: unknown): Registry {
       pid: record.pid,
       pgid: record.pgid,
       command: record.command,
+      ...(record.title === undefined ? {} : { title: record.title.trim() }),
       log_path: record.log_path,
       start_time: record.start_time,
-      timeout: record.timeout,
+      timeout: record.timeout === 0 ? DEFAULT_TIMEOUT : record.timeout,
     };
   }
   return registry;
@@ -201,14 +206,16 @@ export class JobManager {
         reaped.push(id);
       }
     }
-    if (reaped.length) await this.save();
+    const migrated = Object.values(raw as Registry).some((record) => record.timeout === 0);
+    if (reaped.length || migrated) await this.save();
     this.startPolling();
     return { restored, reaped };
   }
 
-  async start(command: string, timeout = DEFAULT_TIMEOUT, cwd?: string): Promise<{ id: string; record: JobRecord }> {
+  async start(command: string, timeout = DEFAULT_TIMEOUT, cwd?: string, title?: string): Promise<{ id: string; record: JobRecord }> {
     if (!command.trim()) throw new Error("Command must not be empty.");
-    if (!Number.isInteger(timeout) || timeout < 0) throw new Error("Timeout must be a non-negative integer.");
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_TIMEOUT) throw new Error(`Timeout must be a positive integer between 1 and ${MAX_TIMEOUT} seconds.`);
+    if (title !== undefined && (typeof title !== "string" || !title.trim())) throw new Error("Job title must not be blank.");
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     const id = allocateId(this.registry);
     const logPath = join(this.dir, `${id}.log`);
@@ -231,7 +238,7 @@ export class JobManager {
       this.stdinClosed.add(id);
       child.stdin?.end(command);
     }
-    const record: JobRecord = { pid: child.pid, pgid: child.pid, command, log_path: logPath, start_time: startTime, timeout };
+    const record: JobRecord = { pid: child.pid, pgid: child.pid, command, ...(title === undefined ? {} : { title: title.trim() }), log_path: logPath, start_time: startTime, timeout };
     this.completed.delete(id);
     this.finished.delete(id);
     this.registry[id] = record;
@@ -254,9 +261,7 @@ export class JobManager {
       this.completed.add(id);
       throw error;
     }
-    if (timeout > 0) {
-      this.timeoutTimers.set(id, setTimeout(() => this.onTimeout(id), timeout * 1000));
-    }
+    this.timeoutTimers.set(id, setTimeout(() => this.onTimeout(id), timeout * 1000));
     return { id, record };
   }
 
@@ -447,7 +452,7 @@ export class JobManager {
         this.restored.delete(id);
         continue;
       }
-      if (record.timeout > 0 && Math.floor(Date.now() / 1000) - record.start_time >= record.timeout) {
+      if (Math.floor(Date.now() / 1000) - record.start_time >= record.timeout) {
         this.timedOut.add(id);
         this.terminate(record, "SIGKILL");
       }
