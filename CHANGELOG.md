@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+- Keep persistent widget status foreground colours; reserve outcome backgrounds for thread results/full inspection, not compact rows.
+- Retain session completion history in overview and `/jobs` after acknowledgement, with full process/command/outcome metadata and no list-count cutoff.
+- Restore current-branch history from real Pi custom-message entries and preserve archived log previews so reused paths cannot show another job's output.
+
 ## 0.6.0
 
 - Require finite positive timeouts (default 60 seconds), bounded to Node's timer range; migrate legacy unlimited jobs to original-start-time 60-second deadlines.

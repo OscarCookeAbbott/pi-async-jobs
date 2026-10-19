@@ -115,6 +115,43 @@ async function setup(t: TestContext, options: { corrupt?: boolean; configure?: (
   return h;
 }
 
+test("historical full views use archived output rather than a subsequently reused log path", async (t) => {
+  const h = await setup(t);
+  const started = await h.call("bash_async", { command: "printf 'original'; printf '_tail'" });
+  await waitUntil(() => h.messages.length === 1);
+  await writeFile(started.details!.logPath, "WRONG_LOG");
+  let shown = "";
+  Reflect.set(h.ctx.ui, "custom", async (factory: Function) => {
+    const view = factory({ terminal: { rows: 100 }, requestRender() {} }, { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text }, {}, () => {});
+    view.handleInput("\r");
+    shown = view.render(200).join("\n");
+  });
+  await h.command.handler("", h.ctx);
+  assert.match(shown, /original_tail/);
+  assert.doesNotMatch(shown, /WRONG_LOG/);
+});
+
+test("menu history restores all current-branch completions without a recent-job cutoff", async (t) => {
+  const h = await setup(t);
+  await h.call("bash_async", { command: "true", title: "Historical job" });
+  await waitUntil(() => h.messages.length === 1);
+  assert.equal(h.overview.has("jobs"), true);
+  const message = h.messages[0].message;
+  const completion = message.details.jobs[0].completion;
+  const entries = Array.from({ length: 60 }, (_, i) => ({ type: "message", message: {
+    role: "custom", customType: "async-jobs-completion", details: { jobs: [{ completion: {
+      ...completion, record: { ...completion.record, pid: completion.record.pid + i, start_time: completion.record.start_time + i },
+    } }] },
+  } }));
+  Reflect.set(h.ctx.sessionManager, "getBranch", () => [...entries, { type: "message", message: { role: "custom", customType: "async-jobs-completion", details: { jobs: [{ completion: {} }] } } }]);
+  h.overview.clear();
+  h.emit("session_tree");
+  h.bus.emit("overview:collect", undefined);
+  assert.equal(h.overview.get("jobs")!.sections[0].items.length, 60);
+  assert.match(h.overview.get("jobs")!.sections[0].items[0].detail!, /Command:/);
+  assert.deepEqual(h.widgetLines(), [], "history must not repopulate acknowledged widget rows");
+});
+
 test("registers the four background tools and validates their arguments", async (t) => {
   const h = await setup(t);
   assert.deepEqual([...h.tools.keys()].sort(), ["bash_async", "bash_check", "bash_kill", "bash_send"]);
@@ -151,14 +188,16 @@ test("optional job titles replace primary command labels without changing execut
   const item = h.overview.get("jobs")!.sections[0].items[0];
   assert.ok(item.title.includes("Friendly build") && !item.title.includes("printf"));
   assert.equal(item.state, "complete");
-  assert.match(item.detail!, /awaiting agent delivery/);
+  assert.match(item.detail!, /awaiting agent delivery/i);
   h.bus.emit("overview:collect", undefined);
   assert.equal(h.overview.get("jobs")?.sections[0].items[0].title, item.title);
   await h.command.handler("", h.ctx);
   assert.match(h.views[0].join("\n"), /Friendly build/);
   assert.match(h.views[1].join("\n"), /printf/);
   h.deliver(0);
-  assert.equal(h.overview.has("jobs"), false);
+  assert.equal(h.overview.has("jobs"), true);
+  assert.equal(h.overview.get("jobs")!.sections[0].items.length, 1);
+  assert.doesNotMatch(h.overview.get("jobs")!.sections[0].items[0].detail!, /awaiting agent delivery/i);
   assert.deepEqual(h.widgetLines(), []);
   assert.ok(h.messages[0].message.details.jobs.some(({ completion }: { completion: { id: string } }) => completion.id === id));
 });
@@ -299,7 +338,13 @@ test("completions from concurrent jobs are collapsed and steer an active run", a
 
 test("job overflow is shown beside counts in the header rather than a footer", async (t) => {
   const h = await setup(t);
-  for (let i = 0; i < 7; i++) await h.call("bash_async", { command: "cat", timeout: 120, title: `Job ${i}` });
+  for (let i = 0; i < 7; i++) {
+    await h.call("bash_async", { command: "cat", timeout: 120, title: `Job ${i}` });
+    if (i === 5) {
+      assert.equal(h.widgetLines(100).length, 7);
+      assert.doesNotMatch(h.widgetLines(100)[0], /Showing/);
+    }
+  }
   const lines = h.widgetLines(100);
   assert.equal(lines[0], "Jobs · 7 running · Showing 1-6/7");
   assert.equal(lines.length, 7);
@@ -449,26 +494,25 @@ test("queue failures retain finished jobs for a later delivery attempt", async (
   assert.deepEqual(h.widgetLines(), []);
 });
 
-test("finished jobs retain outcome markers through immediate completion delivery", async (t) => {
-  process.env.PI_JOBS_DEBOUNCE_MS = "500";
-  t.after(() => delete process.env.PI_JOBS_DEBOUNCE_MS);
+test("persistent finished-job rows use status foregrounds, never thread outcome backgrounds", async (t) => {
   const h = await setup(t);
-  const started = await h.call("bash_async", { command: "exit 3" });
-  const { id } = started.details!;
-  await waitUntil(() => h.widgetLines().some((line) => /1 finished/.test(line)));
-  const colors: string[] = [];
-  const backgrounds: string[] = [];
-  const finished = h.widgetLines(80, {
-    fg: (color, text) => { colors.push(color); return text; },
-    bg: (color, text) => { backgrounds.push(color); return text; },
-  });
-  assert.match(finished[0]!, /1 finished/);
-  assert.match(finished[1]!, new RegExp(`✗ \\[${id}\\] `));
-  assert.ok(colors.includes("muted") && !colors.includes("error"));
-  assert.ok(backgrounds.includes("toolErrorBg"));
-  assert.equal(h.messages.length, 0);
-  await waitUntil(() => h.messages.length === 1);
-  assert.deepEqual(h.widgetLines(), []);
+  h.setAutoDeliver(false);
+  for (const [index, command, color, marker] of [[0, "exit 3", "error", "✗"], [1, "true", "success", "✓"]] as const) {
+    const started = await h.call("bash_async", { command });
+    await waitUntil(() => h.messages.length === index + 1);
+    const colors: string[] = [];
+    const backgrounds: string[] = [];
+    const finished = h.widgetLines(80, {
+      fg: (value, text) => { colors.push(value); return text; },
+      bg: (value, text) => { backgrounds.push(value); return text; },
+    });
+    assert.match(finished[0]!, /1 finished/);
+    assert.ok(finished[1]!.includes(`${marker} [${started.details!.id}]`));
+    assert.ok(colors.includes(color));
+    assert.deepEqual(backgrounds, []);
+    h.deliver(index);
+    assert.deepEqual(h.widgetLines(), []);
+  }
 });
 
 test("non-interactive jobs do not start UI refreshes", async (t) => {

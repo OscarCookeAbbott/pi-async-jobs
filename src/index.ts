@@ -3,6 +3,7 @@ import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type Exte
 import { Box, Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { createBrowser } from "./browser.ts";
+import { completionKey, restoreCompletions, type HistoryCompletion } from "./history.ts";
 import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobLabel, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
 import { DEFAULT_TIMEOUT, MAX_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
 
@@ -43,6 +44,8 @@ const OUTCOME_COLORS: Record<JobOutcome, ThemeColor> = {
   signal: "warning",
   unknown: "dim",
 };
+
+const WIDGET_OUTCOME_COLORS: Record<JobOutcome, ThemeColor> = { ...OUTCOME_COLORS, success: "success", failure: "error" };
 
 function outcomeBackground(outcome: JobOutcome): "toolSuccessBg" | "toolErrorBg" | undefined {
   if (outcome === "success") return "toolSuccessBg";
@@ -116,6 +119,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let loadError: string | undefined;
   let ctxRef: ExtensionContext | undefined;
   let pending: JobCompletion[] = [];
+  const history = new Map<string, HistoryCompletion>();
   const pendingBatches = new Map<string, JobCompletion[]>();
   let flushTimer: NodeJS.Timeout | undefined;
   let refreshTimer: NodeJS.Timeout | undefined;
@@ -168,9 +172,13 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     try {
       const active = loadError ? [] : manager?.active() ?? [];
       const states: Record<JobOutcome, string> = { running: "running", success: "complete", failure: "failed", timeout: "failed", signal: "cancelled", unknown: "unknown" };
+      const awaiting = new Set(pending.map(completionKey));
       const items = [
-        ...active.map(({ id, record, running }) => ({ title: `[${id}] ${jobLabel(record)}`, state: running ? "running" : "unknown", detail: `${running ? "Running" : "Finishing"} · timeout ${record.timeout}s` })),
-        ...pending.map((completion) => ({ title: `[${completion.id}] ${jobLabel(completion.record)}`, state: states[jobOutcome(completion)], detail: `${jobOutcome(completion)} · ${completion.runtimeSeconds}s · awaiting agent delivery` })),
+        ...active.map(({ id, record, running }) => ({ title: `[${id}] ${jobLabel(record)}`, state: running ? "running" : "unknown", detail: `${formatMetadata(jobMetadata(id, record))}\nStatus: ${running ? "Running" : "Finishing"}\nTimeout: ${record.timeout}s` })),
+        ...[...history.values()].reverse().map((completion) => ({
+          title: `[${completion.id}] ${jobLabel(completion.record)}`, state: states[jobOutcome(completion)],
+          detail: `${formatMetadata(jobMetadata(completion.id, completion.record))}\nStatus: ${jobOutcome(completion)}\nRuntime: ${completion.runtimeSeconds}s\nTimeout: ${completion.record.timeout}s${awaiting.has(completionKey(completion)) ? "\nAwaiting agent delivery." : ""}`,
+        })),
       ];
       if (!items.length) { pi.events.emit("overview:remove", "jobs"); return; }
       pi.events.emit("overview:publish", { id: "jobs", badge: `${items.length} ${items.length === 1 ? "job" : "jobs"}`, sections: [{ title: "Jobs", items }] });
@@ -218,9 +226,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
           return [
             heading,
             ...jobs.slice(0, 6).map(({ id, record, running, outcome, runtimeSeconds }) => {
-              const row = truncateToWidth(theme.fg(OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, running, runtimeSeconds ?? Math.max(0, now - record.start_time), outcome)), width);
-              const background = outcomeBackground(outcome);
-              return background ? theme.bg(background, truncateToWidth(row, width, undefined, true)) : row;
+              return truncateToWidth(theme.fg(WIDGET_OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, running, runtimeSeconds ?? Math.max(0, now - record.start_time), outcome)), width);
             }),
           ];
         },
@@ -243,6 +249,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     try {
       const jobs = await Promise.all(batch.map(async (completion) => ({ completion, tail: await tailFile(completion.record.log_path, COMPLETION_TAIL_LINES) })));
       if (!pendingBatches.has(notificationId)) return;
+      for (const { completion, tail } of jobs) history.set(completionKey(completion), { ...completion, tail });
       const content = formatCompletions(jobs);
       // Queuing is not delivery. message_end acknowledges when Pi consumes this exact frame.
       pi.sendMessage({ customType: "async-jobs-completion", content, display: true, details: { jobs, notificationId } }, ctxRef && !ctxRef.isIdle() ? { deliverAs: "steer" } : { triggerTurn: true });
@@ -255,6 +262,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   }
 
   function enqueue(completion: JobCompletion): void {
+    history.set(completionKey(completion), completion);
     notifyChange("completed", `Job [${completion.id}] finished: ${jobOutcome(completion)}.${completion.record.title ? ` ${completion.record.title}` : ""}`);
     pending.push(completion);
     if (!flushTimer) flushTimer = setTimeout(() => void flush().catch(() => {}), Number.isFinite(debounceMs) ? debounceMs : 200);
@@ -312,8 +320,17 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     updateWidget();
   });
 
+  function restoreHistory(ctx: ExtensionContext): void {
+    const queued = pending.map((completion) => history.get(completionKey(completion)) ?? completion);
+    history.clear();
+    for (const completion of [...restoreCompletions(ctx.sessionManager.getBranch()), ...queued]) history.set(completionKey(completion), completion);
+  }
+
+  pi.on("session_tree", (_event, ctx) => { ctxRef = ctx; restoreHistory(ctx); updateWidget(); });
+
   pi.on("session_start", async (_event, ctx) => {
     stopWidgetRefresh();
+    restoreHistory(ctx);
     ctxRef = ctx;
     subscribeOverview();
     removeNotificationHook?.();
@@ -367,6 +384,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     if (flushTimer) clearTimeout(flushTimer);
     flushTimer = undefined;
     pending = [];
+    history.clear();
     pendingBatches.clear();
     manager?.dispose();
     manager = undefined;
@@ -525,9 +543,9 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
           catch (error) { detail += `\nStatus unavailable: ${error instanceof Error ? error.message : String(error)}`; }
           return { title: formatJobLine(id, record.title ?? record.command, running, Math.max(0, Math.floor(Date.now() / 1000) - record.start_time)), detail };
         }),
-        ...pending.map(async (completion) => ({
+        ...[...history.values()].reverse().map(async (completion) => ({
           title: formatJobLine(completion.id, completion.record.title ?? completion.record.command, false, completion.runtimeSeconds, jobOutcome(completion)),
-          detail: `${formatMetadata(jobMetadata(completion.id, completion.record))}\n\n${formatStatus({ ...completion, running: false, tail: await tailFile(completion.record.log_path, TAIL_LINES) })}\nAwaiting agent delivery.`,
+          detail: `${formatMetadata(jobMetadata(completion.id, completion.record))}\n\n${formatStatus({ ...completion, running: false, tail: completion.tail ?? { text: "[No archived log preview is available; historical log paths may be reused.]", truncated: false } })}${pending.some((job) => completionKey(job) === completionKey(completion)) ? "\nAwaiting agent delivery." : ""}`,
           color: OUTCOME_COLORS[jobOutcome(completion)],
           background: outcomeBackground(jobOutcome(completion)),
         })),
