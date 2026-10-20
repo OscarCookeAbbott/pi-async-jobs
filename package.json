@@ -1,6 +1,6 @@
 {
   "name": "@oscar-robin/pi-async-jobs",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Background shell jobs with event-driven steering for Pi.",
   "type": "module",
   "license": "MIT",

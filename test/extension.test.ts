@@ -90,7 +90,9 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     failNotifications() { failNotifications = true; },
     async call(name: string, params: JsonObject) {
       const tool = tools.get(name)!;
-      const validated = validateToolArguments(tool, { type: "toolCall", id: "call", name, arguments: params });
+      // Non-title scenarios use the command as a fixture label; raw title requirements are tested separately.
+      const args = name === "bash_async" ? { title: typeof params.command === "string" ? params.command : "Test job", ...params } : params;
+      const validated = validateToolArguments(tool, { type: "toolCall", id: "call", name, arguments: args });
       return tool.execute("call", validated, undefined, undefined, ctx as any);
     },
     text(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -115,6 +117,19 @@ async function setup(t: TestContext, options: { corrupt?: boolean; configure?: (
   return h;
 }
 
+test("menu shows only currently running jobs, with no badge or completion rows", async (t) => {
+  const h = await setup(t);
+  const running = await h.call("bash_async", { command: "cat", title: "Live job", timeout: 120 });
+  assert.equal(h.overview.get("jobs")!.badge, "");
+  assert.equal(h.overview.get("jobs")!.sections[0].items[0].state, "running");
+  assert.match(h.overview.get("jobs")!.sections[0].items[0].title, /Live job/);
+  await h.call("bash_async", { command: "true" });
+  await waitUntil(() => h.messages.length === 1);
+  assert.equal(h.overview.get("jobs")!.sections[0].items.length, 1);
+  await h.call("bash_kill", { id: running.details!.id });
+  assert.equal(h.overview.has("jobs"), false);
+});
+
 test("historical full views use archived output rather than a subsequently reused log path", async (t) => {
   const h = await setup(t);
   const started = await h.call("bash_async", { command: "printf 'original'; printf '_tail'" });
@@ -131,11 +146,11 @@ test("historical full views use archived output rather than a subsequently reuse
   assert.doesNotMatch(shown, /WRONG_LOG/);
 });
 
-test("menu history restores all current-branch completions without a recent-job cutoff", async (t) => {
+test("full-view history restores all completions without republishing finished jobs to the menu", async (t) => {
   const h = await setup(t);
   await h.call("bash_async", { command: "true", title: "Historical job" });
   await waitUntil(() => h.messages.length === 1);
-  assert.equal(h.overview.has("jobs"), true);
+  assert.equal(h.overview.has("jobs"), false);
   const message = h.messages[0].message;
   const completion = message.details.jobs[0].completion;
   const entries = Array.from({ length: 60 }, (_, i) => ({ type: "message", message: {
@@ -147,8 +162,9 @@ test("menu history restores all current-branch completions without a recent-job 
   h.overview.clear();
   h.emit("session_tree");
   h.bus.emit("overview:collect", undefined);
-  assert.equal(h.overview.get("jobs")!.sections[0].items.length, 60);
-  assert.match(h.overview.get("jobs")!.sections[0].items[0].detail!, /Command:/);
+  assert.equal(h.overview.has("jobs"), false);
+  await h.command.handler("", h.ctx);
+  assert.match(h.views[0][0], /1\/60 selected/);
   assert.deepEqual(h.widgetLines(), [], "history must not repopulate acknowledged widget rows");
 });
 
@@ -160,6 +176,10 @@ test("registers the four background tools and validates their arguments", async 
   assert.equal(tool.promptSnippet, "Run lengthy commands without blocking the agent, with automatic completion notifications.");
   assert.ok(tool.description.startsWith(tool.promptSnippet!));
   assert.match(tool.promptGuidelines!.join("\n"), /reserve bash for quick commands/);
+  assert.match(tool.promptGuidelines!.join("\n"), /short descriptive title/);
+  assert.throws(() => validateToolArguments(tool, { type: "toolCall", id: "missing-title", name: "bash_async", arguments: { command: "true" } }), /title|validation/i);
+  await assert.rejects(tool.execute("missing-title", { command: "true" } as any, undefined, undefined, h.ctx as any), /title/i);
+  await assert.rejects(h.call("bash_async", { command: "true", title: "\x1b[31m\x1b[0m" }), /title/i);
   assert.match(tool.promptGuidelines!.join("\n"), /continue independent work or end your turn/);
   await assert.rejects(h.call("bash_async", { command: "" }), /validation|minimum/i);
   await assert.rejects(h.call("bash_async", { command: "true", timeout: 0 }), /validation|minimum/i);
@@ -168,7 +188,7 @@ test("registers the four background tools and validates their arguments", async 
   await assert.rejects(h.call("bash_check", { id: "zz" }), /Unknown job/);
 });
 
-test("optional job titles replace primary command labels without changing execution or debug metadata", async (t) => {
+test("job titles replace primary command labels without changing execution or debug metadata", async (t) => {
   const h = await setup(t);
   h.setAutoDeliver(false);
   const started = await h.call("bash_async", { command: "printf 'real output'", title: "Friendly build" });
@@ -184,20 +204,14 @@ test("optional job titles replace primary command labels without changing execut
   assert.match(header, /Friendly build/);
   assert.ok(!header.includes("PRIVATE_COMMAND"));
   assert.equal(started.details!.command, "printf 'real output'");
-  assert.equal(h.overview.get("jobs")?.badge, "1 job");
-  const item = h.overview.get("jobs")!.sections[0].items[0];
-  assert.ok(item.title.includes("Friendly build") && !item.title.includes("printf"));
-  assert.equal(item.state, "complete");
-  assert.match(item.detail!, /awaiting agent delivery/i);
+  assert.equal(h.overview.has("jobs"), false);
   h.bus.emit("overview:collect", undefined);
-  assert.equal(h.overview.get("jobs")?.sections[0].items[0].title, item.title);
+  assert.equal(h.overview.has("jobs"), false);
   await h.command.handler("", h.ctx);
   assert.match(h.views[0].join("\n"), /Friendly build/);
   assert.match(h.views[1].join("\n"), /printf/);
   h.deliver(0);
-  assert.equal(h.overview.has("jobs"), true);
-  assert.equal(h.overview.get("jobs")!.sections[0].items.length, 1);
-  assert.doesNotMatch(h.overview.get("jobs")!.sections[0].items[0].detail!, /awaiting agent delivery/i);
+  assert.equal(h.overview.has("jobs"), false);
   assert.deepEqual(h.widgetLines(), []);
   assert.ok(h.messages[0].message.details.jobs.some(({ completion }: { completion: { id: string } }) => completion.id === id));
 });
@@ -583,7 +597,7 @@ test("desktop notifications default off and filter job changes without exposing 
   for (const mode of [undefined, "none", "started", "completed", "all", "invalid", true, null]) {
     await t.test(`mode ${mode}`, async (t) => {
       const h = await setup(t, { configure: async () => mode === undefined ? {} : { asyncJobs: { notifications: mode } } });
-      const started = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 120 });
+      const started = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 120, title: "Process input" });
       const id = started.details!.id;
       await h.call("bash_send", { id, input: "PRIVATE_INPUT" });
       await h.call("bash_check", { id });
@@ -625,7 +639,7 @@ test("settled preparation replaces the default only while jobs run, even with jo
     return draft.message;
   };
   assert.equal(prepare(), "Agent finished:");
-  const first = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 120 });
+  const first = await h.call("bash_async", { command: "cat\n# PRIVATE_COMMAND", timeout: 120, title: "Process input" });
   const second = await h.call("bash_async", { command: "cat", timeout: 120 });
   assert.equal(prepare("turn_end"), "Agent finished:");
   const message = prepare();

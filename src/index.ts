@@ -170,18 +170,13 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   function publishOverview(): void {
     if (!ctxRef) return;
     try {
-      const active = loadError ? [] : manager?.active() ?? [];
-      const states: Record<JobOutcome, string> = { running: "running", success: "complete", failure: "failed", timeout: "failed", signal: "cancelled", unknown: "unknown" };
-      const awaiting = new Set(pending.map(completionKey));
-      const items = [
-        ...active.map(({ id, record, running }) => ({ title: `[${id}] ${jobLabel(record)}`, state: running ? "running" : "unknown", detail: `${formatMetadata(jobMetadata(id, record))}\nStatus: ${running ? "Running" : "Finishing"}\nTimeout: ${record.timeout}s` })),
-        ...[...history.values()].reverse().map((completion) => ({
-          title: `[${completion.id}] ${jobLabel(completion.record)}`, state: states[jobOutcome(completion)],
-          detail: `${formatMetadata(jobMetadata(completion.id, completion.record))}\nStatus: ${jobOutcome(completion)}\nRuntime: ${completion.runtimeSeconds}s\nTimeout: ${completion.record.timeout}s${awaiting.has(completionKey(completion)) ? "\nAwaiting agent delivery." : ""}`,
-        })),
-      ];
+      const active = loadError ? [] : (manager?.active() ?? []).filter(({ running }) => running);
+      const items = active.map(({ id, record }) => ({
+        title: `[${id}] ${jobLabel(record)}`, state: "running", kind: "job", subtitle: `Running · timeout ${record.timeout}s`, body: record.command,
+        detail: `${formatMetadata(jobMetadata(id, record))}\nStatus: Running\nTimeout: ${record.timeout}s`,
+      }));
       if (!items.length) { pi.events.emit("overview:remove", "jobs"); return; }
-      pi.events.emit("overview:publish", { id: "jobs", badge: `${items.length} ${items.length === 1 ? "job" : "jobs"}`, sections: [{ title: "Jobs", items }] });
+      pi.events.emit("overview:publish", { id: "jobs", badge: "", sections: [{ title: "Running jobs", items }] });
     } catch { /* Overview is optional and must not affect jobs. */ }
   }
   function subscribeOverview(): void {
@@ -394,20 +389,22 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bash_async",
     label: "Async Bash",
-    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Every job requires a finite positive timeout; the default is 60 seconds.",
+    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Every job requires a short descriptive title and a finite positive timeout; the default timeout is 60 seconds.",
     promptSnippet: "Run lengthy commands without blocking the agent, with automatic completion notifications.",
     promptGuidelines: [
+      "Always provide a short descriptive title stating the job's purpose, rather than copying a long command.",
       "Use bash_async for lengthy commands such as builds, test suites, and servers; reserve bash for quick commands. After starting a job, continue independent work or end your turn. Do not poll for completion; a completion message arrives automatically.",
       "Use bash_check only to inspect progress, bash_send to answer a prompt on stdin, and bash_kill to stop a job.",
     ],
     parameters: Type.Object({
       command: Type.String({ minLength: 1, description: "Shell command to execute." }),
       timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT, description: "Maximum execution time in seconds; must be positive. Defaults to 60." })),
-      title: Type.Optional(Type.String({ minLength: 1, description: "Optional display title instead of the command in job labels." })),
+      title: Type.String({ minLength: 1, pattern: "\\S", description: "Required short, descriptive job title shown instead of the command." }),
     }, { additionalProperties: false }),
     executionMode: "sequential",
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (typeof params.title !== "string" || !params.title.trim() || !jobLabel({ title: params.title, command: "" })) throw new Error("A visible, nonblank job title is required.");
       const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd, params.title);
       updateWidget();
       notifyChange("started", `Job [${jobId}] started.${record.title ? ` ${record.title}` : ""}`);

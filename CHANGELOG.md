@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- Require a visible, nonblank descriptive title for every new bash_async call, in both schema and execution guards; retain legacy untitled-record fallbacks.
+- Show only currently running jobs in the menu, with no inline count or completed-history rows; /jobs history and widget/thread delivery semantics remain unchanged.
+- Publish typed running-job content for native command/detail cards.
+
 ## 0.7.0
 
 - Keep persistent widget status foreground colours; reserve outcome backgrounds for thread results/full inspection, not compact rows.
