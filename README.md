@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Before loading this update, wait for jobs in all Pi instances to finish; older versions can signal adopted foreign jobs during shutdown (see State and recovery). Then start a new session or run `/reload`. For a pinned release, append `@v0.9.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Before loading this update, wait for jobs in all Pi instances to finish; older versions can signal adopted foreign jobs during shutdown (see State and recovery). Then start a new session or run `/reload`. For a pinned release, append `@v0.10.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 
@@ -46,7 +46,7 @@ The tools run sequentially because they share the on-disk registry. Each command
 When a job finishes, the extension builds one frame per completion:
 
 ```text
-Job [a1] succeeded (14s): npm test
+Job succeeded: [a1] Run test suite (14s)
 Output [a1]:
 17 tests passed.
 ```
@@ -59,9 +59,11 @@ Completions that arrive during an active run or within the debounce window are c
 
 ## Widget and command
 
+Successful completion and `bash_check` displays put duration in a muted `Took …` footer, separated from content by a blank line, matching Pi's shell units (`4.2s`, `1m 30s`, `2h 3m 4s`). The footer does not consume the five-line output preview. This timing footer is UI-only; agent summaries retain their inline runtime and widget clocks retain their compact units. ID/title pairs consistently use label-first forms such as `Job succeeded: [ab] Run tests`; ID-only acknowledgements retain sentence-style wording.
+
 Async call headers retain Pi's native bold `$ title` presentation (or `$ command` for legacy untitled jobs), followed by a muted effective timeout and trailing `[async]` marker, e.g. `(timeout 60s) [async]`. Other job tools use bold names and bold-accented boxed job IDs. Start/input/termination acknowledgements and running status headings use pi-lens-style bold blue highlighting, without changing surrounding backgrounds. Start commands show a five-visual-line head preview, expandable independently of agent context; continuation instructions are agent-only. Log output uses the standard tool-output colour; invocation errors use the error colour. Completion notifications retain Pi's themed message background and configured output padding. Successful jobs use the semantic `toolSuccessBg` background and failed jobs use `toolErrorBg`, with normal foreground text, in thread status results, full views and both collapsed/expanded completion sections. The compact persistent widget instead uses semantic status foregrounds (success/error/warning), never outcome backgrounds. Mixed batches apply the appropriate background separately to each job. Normal foreground styling is retained; timeouts/signals keep their warning styling. This does not change tool result success/error semantics. Job output bodies collapse to the last five visual lines (including wrapped long lines), with Pi's configured tool-expansion key hint; status headings remain visible. Clicking a completion notification toggles that notification independently, while the tool-output shortcut still controls all messages together. Expanding inspection/completion views reveals retained output and process metadata; expanding a start result reveals only its full command and acknowledgement. Existing UI safety limits apply. This presentation is TUI-only and never truncates model feedback further.
 
-- The widget shows `▶ [ab] 14s command`, with compact clocks (`14s`, `1:02`, `1:02:03`) ahead of command labels so long commands cannot hide the duration. It requests a redraw once per second while jobs run, without rebuilding the widget or sending model messages. Refreshes stop when no jobs are running, and never start in non-interactive modes.
+- The widget shows `▶ Job running (14s): [ab] command`, with compact clocks (`14s`, `1:02`, `1:02:03`) ahead of command labels so long commands cannot hide the duration. It requests a redraw once per second while jobs run, without rebuilding the widget or sending model messages. Refreshes stop when no jobs are running, and never start in non-interactive modes.
 - Finished jobs remain visible until their completion reaches the agent's context, using their recorded (non-increasing) runtime and distinct outcome markers and colours: `✓` success, `✗` failure, `⏱` timeout, `⚠` signal, and `?` unknown. Queued-but-not-consumed completions count as finished in the heading and remain visible while the agent is busy, then disappear once delivered.
 - Command labels are single-line and stripped of terminal control sequences; each row fits the available terminal width. Multiline commands therefore cannot add unaccounted rows over the editor. The widget is hidden when there are neither running nor unnotified jobs.
 - `/jobs` opens a snapshot browser of running jobs and session completion history, including jobs already delivered to the agent. ↑/↓ or Home/End selects; Enter/Space toggles full metadata and the bounded log tail; Page Up/Down scrolls expanded details and Escape closes. Fullscreen mouse row clicks, wheel scrolling and navigation buttons are supported; regular terminals keep native mouse/scrollback behaviour.

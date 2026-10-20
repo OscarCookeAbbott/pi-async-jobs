@@ -4,7 +4,7 @@ import { Box, Container, Text, truncateToWidth, type Component } from "@earendil
 import { Type } from "typebox";
 import { createBrowser } from "./browser.ts";
 import { completionKey, restoreCompletions, type HistoryCompletion } from "./history.ts";
-import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobLabel, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
+import { formatCompletions, formatJobDuration, formatJobLine, formatJobSummary, formatMetadata, formatStatus, jobLabel, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
 import { DEFAULT_TIMEOUT, MAX_TIMEOUT, JobManager, TAIL_LINES, sessionJobsDir, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
 
 type NotificationMode = "none" | "started" | "completed" | "all";
@@ -60,12 +60,16 @@ function completionColor(completion: JobCompletion): ThemeColor {
   return outcome === "success" || outcome === "failure" ? "toolTitle" : OUTCOME_COLORS[outcome];
 }
 
+function completionHeadingId(line: string): string | undefined {
+  return /^Job(?: [^:]*)?: \[([0-9a-z]{2})\](?: |$)/.exec(line)?.[1] ?? /^Job \[([0-9a-z]{2})\] /.exec(line)?.[1];
+}
+
 function completionHeadingColor(line: string, jobs: CompletionFeedback[], fallback: ThemeColor): ThemeColor {
-  const match = /^Job \[([0-9a-z]{2})\] /.exec(line);
-  if (!match) return fallback;
-  const job = jobs.find(({ completion }) => completion.id === match[1]);
+  const id = completionHeadingId(line);
+  if (!id) return fallback;
+  const job = jobs.find(({ completion }) => completion.id === id);
   if (job) return completionColor(job.completion);
-  if (/^Job \[[0-9a-z]{2}\] (timed out|terminated)\b/.test(line)) return "warning";
+  if (/^Job (timed out|terminated)\b/.test(line) || /^Job \[[0-9a-z]{2}\] (timed out|terminated)\b/.test(line)) return "warning";
   return "toolTitle";
 }
 
@@ -115,12 +119,23 @@ const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { exp
   const metadata = result.details as (JobMetadata & { status?: JobStatus }) | undefined;
   const background = metadata?.status && outcomeBackground(jobOutcome(metadata.status));
   const color = context?.isError ? "error" : "toolOutput";
-  const [heading = "", ...body] = uiText(text).split("\n");
+  const successStatus = !context?.isError && !isPartial && metadata?.status && jobOutcome(metadata.status) === "success" ? metadata.status : undefined;
+  const [originalHeading = "", ...body] = uiText(successStatus ? text.trimEnd() : text).split("\n");
+  let heading = originalHeading;
+  if (successStatus) {
+    const prefix = `Job [${successStatus.id}] succeeded (${successStatus.runtimeSeconds}s):`;
+    if (heading === formatJobSummary(successStatus)) heading = formatJobSummary(successStatus, false);
+    else if (heading.startsWith(prefix)) heading = `Job succeeded: [${successStatus.id}]` + heading.slice(prefix.length);
+  }
   const component = new Container();
   const emphasize = typeof metadata?.id === "string" && !context?.isError && !isPartial && (!metadata.status || metadata.status.running);
   component.addChild(new Text(theme.fg(color, emphasize ? highlight(heading) : heading), 0, 0));
   if (body.length) component.addChild(outputPreview(theme.fg(color, body.join("\n")), expanded, theme));
-  if (expanded && typeof metadata?.command === "string") component.addChild(new Text(theme.fg("muted", uiText(formatMetadata(metadata))), 0, 0));
+  if (expanded && typeof metadata?.command === "string") {
+    const detail = formatMetadata(metadata);
+    component.addChild(new Text(theme.fg("muted", uiText(successStatus ? detail.trimEnd() : detail)), 0, 0));
+  }
+  if (successStatus) component.addChild(new Text(`\n${theme.fg("muted", `Took ${formatJobDuration(successStatus.runtimeSeconds)}`)}`, 0, 0));
   if (!background) return component;
   const box = new Box(0, 0, (line) => theme.bg(background, line));
   box.addChild(component);
@@ -185,7 +200,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     try {
       const active = loadError ? [] : (manager?.active() ?? []).filter(({ running }) => running);
       const items = active.map(({ id, record }) => ({
-        title: `[${id}] ${jobLabel(record)}`, state: "running", kind: "job", subtitle: `Running · timeout ${record.timeout}s`, body: record.command,
+        title: `Job running: [${id}] ${jobLabel(record)}`, state: "running", kind: "job", subtitle: `Running · timeout ${record.timeout}s`, body: record.command,
         detail: `${formatMetadata(jobMetadata(id, record))}\nStatus: Running\nTimeout: ${record.timeout}s`,
       }));
       if (!items.length) { pi.events.emit("overview:remove", "jobs"); return; }
@@ -271,7 +286,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   function enqueue(completion: JobCompletion): void {
     history.set(completionKey(completion), completion);
-    notifyChange("completed", `Job [${completion.id}] finished: ${jobOutcome(completion)}.${completion.record.title ? ` ${completion.record.title}` : ""}`);
+    notifyChange("completed", completion.record.title ? `Job finished (${jobOutcome(completion)}): [${completion.id}] ${completion.record.title}` : `Job [${completion.id}] finished: ${jobOutcome(completion)}.`);
     pending.push(completion);
     if (!flushTimer) flushTimer = setTimeout(() => void flush().catch(() => {}), Number.isFinite(debounceMs) ? debounceMs : 200);
     updateWidget();
@@ -282,33 +297,44 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     return expandableMessage(message, expanded, (showDetails) => {
       const jobs = message.details?.jobs ?? [];
       let fallbackOutcome: JobOutcome = "unknown";
-      if (/^Job \[[0-9a-z]{2}\] failed\b/m.test(content)) fallbackOutcome = "failure";
-      else if (/^Job \[[0-9a-z]{2}\] succeeded\b/m.test(content)) fallbackOutcome = "success";
+      if (/^Job (?:\[[0-9a-z]{2}\] )?failed\b/m.test(content)) fallbackOutcome = "failure";
+      else if (/^Job (?:\[[0-9a-z]{2}\] )?succeeded\b/m.test(content)) fallbackOutcome = "success";
       const sections = jobs.length
-        ? jobs.map((job) => ({
-          text: showDetails ? `${formatMetadata(jobMetadata(job.completion.id, job.completion.record))}\n${formatStatus({ ...job.completion, running: false, tail: job.tail })}` : formatCompletions([job]),
-          jobs: [job], colour: completionColor(job.completion), background: outcomeBackground(jobOutcome(job.completion)),
-        }))
-        : [{ text: content, jobs, colour: "toolTitle" as ThemeColor, background: outcomeBackground(fallbackOutcome) }];
+        ? jobs.map((job) => {
+          const outcome = jobOutcome(job.completion);
+          const successful = outcome === "success";
+          const status = formatStatus({ ...job.completion, running: false, tail: job.tail }, { includeRuntime: !successful });
+          const collapsed = successful ? status : formatCompletions([job]);
+          const text = showDetails ? `${formatMetadata(jobMetadata(job.completion.id, job.completion.record))}\n${status}` : collapsed;
+          const footer = successful ? `Took ${formatJobDuration(job.completion.runtimeSeconds)}` : undefined;
+          return {
+            text: footer ? `${text.trimEnd()}\n\n${footer}` : text,
+            footer, jobs: [job], colour: completionColor(job.completion), background: outcomeBackground(outcome),
+          };
+        })
+        : [{ text: content, footer: undefined, jobs, colour: "toolTitle" as ThemeColor, background: outcomeBackground(fallbackOutcome) }];
       const shown = truncateHead(sections.map(({ text }) => text).join("\n\n"), { maxLines: 500, maxBytes: 30000 });
       const container = new Container();
       let offset = 0;
       sections.forEach((section) => {
         const box = new Box(outputPad ?? 1, 1, (line) => theme.bg(section.background ?? "customMessageBg", line));
-        const text = shown.content.slice(offset, offset + section.text.length);
+        let text = shown.content.slice(offset, offset + section.text.length);
         offset += section.text.length + 2;
         if (!text) return;
+        const footer = text.length === section.text.length ? section.footer : undefined;
+        if (footer) text = text.slice(0, -footer.length - 2);
         let heading = true;
         const headings: string[] = [];
         const body: string[] = [];
         const bodyColour = section.colour === "toolTitle" ? "customMessageText" : section.colour;
         text.split("\n").forEach((line, index) => {
-          if (index > 0 && !/^Job \[[0-9a-z]{2}\] /.test(line)) heading = false;
+          if (index > 0 && !completionHeadingId(line)) heading = false;
           if (heading) headings.push(theme.fg(completionHeadingColor(line, section.jobs, section.colour), theme.bold(line)));
           else body.push(theme.fg(bodyColour, line));
         });
         box.addChild(new Text(headings.join("\n"), 0, 0));
         if (body.length) box.addChild(outputPreview(body.join("\n"), showDetails, theme));
+        if (footer) box.addChild(new Text(`\n${theme.fg("muted", footer)}`, 0, 0));
         container.addChild(box);
       });
       if (shown.truncated) container.addChild(new Text(theme.fg("muted", UI_TRUNCATION_NOTE), 0, 0));
@@ -427,7 +453,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       if (typeof params.title !== "string" || !params.title.trim() || !jobLabel({ title: params.title, command: "" })) throw new Error("A visible, nonblank job title is required.");
       const { id: jobId, record } = await requireManager().start(params.command, params.timeout ?? DEFAULT_TIMEOUT, ctx.cwd, params.title);
       updateWidget();
-      notifyChange("started", `Job [${jobId}] started.${record.title ? ` ${record.title}` : ""}`);
+      notifyChange("started", record.title ? `Job started: [${jobId}] ${record.title}` : `Job [${jobId}] started.`);
       return {
         content: [{ type: "text", text: `Job [${jobId}] started in background. Continue independent work or end your turn; completion will notify you automatically.` }],
         details: jobMetadata(jobId, record),

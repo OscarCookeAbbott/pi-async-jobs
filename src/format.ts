@@ -43,14 +43,14 @@ const OUTCOME_GLYPHS: Record<JobOutcome, string> = {
   unknown: "?",
 };
 
-function summary(job: JobCompletion | JobStatus): string {
+export function formatJobSummary(job: JobCompletion | JobStatus, includeRuntime = true): string {
   const status = "running" in job && job.running ? "running"
     : job.timedOut ? `timed out after ${job.record.timeout}s`
     : job.signal ? `terminated (${job.signal})`
     : job.exitCode === 0 ? "succeeded"
     : job.exitCode === null ? "finished (exit unknown)"
     : `failed (exit ${job.exitCode})`;
-  return `Job [${job.id}] ${status} (${job.runtimeSeconds}s): ${jobLabel(job.record)}`;
+  return `Job ${status}: [${job.id}] ${jobLabel(job.record)}${includeRuntime ? ` (${job.runtimeSeconds}s)` : ""}`;
 }
 
 function output(id: string, tail: LogTail): string {
@@ -77,19 +77,28 @@ export function formatCompletions(jobs: readonly CompletionFeedback[]): string {
   const notice = "[Completion details truncated; inspect the listed log files.]";
   const budget = MAX_COMPLETION_BYTES - Buffer.byteLength(heading + logs.content + notice) - 8;
   // Keep statuses ahead of output so a verbose job cannot bury later failures.
-  const headers = truncateHead(jobs.map(({ completion }) => summary(completion)).join("\n"), { maxBytes: Math.floor(budget / 2), maxLines: 10000 });
+  const headers = truncateHead(jobs.map(({ completion }) => formatJobSummary(completion)).join("\n"), { maxBytes: Math.floor(budget / 2), maxLines: 10000 });
   const tails = truncateHead(jobs.map(({ completion, tail }) => output(completion.id, tail)).filter(Boolean).join("\n\n"), { maxBytes: budget - Buffer.byteLength(headers.content), maxLines: 10000 });
   const truncated = headers.truncated || tails.truncated;
   const showLogs = truncated || jobs.some(({ completion, tail }) => needsLog(completion, tail));
   return [heading.trimEnd(), headers.content, tails.content, showLogs ? logs.content : "", truncated || (showLogs && logs.truncated) ? notice : ""].filter(Boolean).join("\n");
 }
 
-export function formatStatus(status: JobStatus): string {
-  return [summary(status), output(status.id, status.tail), needsLog(status, status.tail) ? `Log: ${status.record.log_path}` : ""].filter(Boolean).join("\n");
+export function formatStatus(status: JobStatus, options: { includeRuntime?: boolean } = {}): string {
+  return [formatJobSummary(status, options.includeRuntime !== false), output(status.id, status.tail), needsLog(status, status.tail) ? `Log: ${status.record.log_path}` : ""].filter(Boolean).join("\n");
+}
+
+export function formatJobDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainder = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainder}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
 }
 
 export function formatMetadata(metadata: JobMetadata): string {
-  return `Job [${metadata.id}] · PID ${metadata.pid} · PGID ${metadata.pgid}${metadata.title ? `\nTitle: ${commandLabel(metadata.title)}` : ""}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
+  return `Job: [${metadata.id}] ${jobLabel(metadata)}\nPID ${metadata.pid} · PGID ${metadata.pgid}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
 }
 
 export function formatJobLine(id: string, command: string, running: boolean, runtimeSeconds: number, outcome: JobOutcome = running ? "running" : "unknown"): string {
@@ -98,7 +107,8 @@ export function formatJobLine(id: string, command: string, running: boolean, run
   let duration = `${runtimeSeconds}s`;
   if (minutes >= 60) duration = `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${seconds}`;
   else if (minutes) duration = `${minutes}:${seconds}`;
-  return `${OUTCOME_GLYPHS[outcome]} [${id}] ${duration} ${commandLabel(command)}`;
+  const status: Record<JobOutcome, string> = { running: "running", success: "succeeded", failure: "failed", timeout: "timed out", signal: "terminated", unknown: "finished" };
+  return `${OUTCOME_GLYPHS[outcome]} Job ${status[outcome]} (${duration}): [${id}] ${commandLabel(command)}`;
 }
 
 export function jobMetadata(id: string, record: JobRecord): JobMetadata {

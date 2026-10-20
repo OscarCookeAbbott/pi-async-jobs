@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0
+
+- Move successful completion/status UI durations to a blank-line-separated, muted `Took …` footer matching built-in bash; preserve runtime values and the output preview budget.
+- Put labels before ID/title pairs in summaries, widget/browser rows, metadata, titled notifications and overview contributions; retain ID-only acknowledgements and legacy message rendering.
+
 ## 0.9.0
 
 - Isolate active registries/logs by stable Pi session ID, preventing different threads from restoring, controlling or receiving each other's jobs. Leave legacy unscoped state untouched rather than guessing ownership.
