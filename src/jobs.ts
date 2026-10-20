@@ -72,6 +72,11 @@ const DEFAULT_SHELL: ShellCommand = { shell: "sh", args: ["-c"] };
 
 export const defaultJobsDir = (): string => process.env.PI_JOBS_DIR ?? join(tmpdir(), "pi_jobs");
 
+export function sessionJobsDir(sessionId: string, root = defaultJobsDir()): string {
+  if (typeof sessionId !== "string" || !sessionId.trim()) throw new Error("A session ID is required for background jobs.");
+  return join(root, "sessions", createHash("sha256").update(sessionId).digest("hex"));
+}
+
 export function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);

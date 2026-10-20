@@ -48,6 +48,8 @@ test("batched notifications bound output without burying later job statuses",  (
   const text = formatCompletions(jobs);
   assert.ok(Buffer.byteLength(text) <= MAX_COMPLETION_BYTES);
   assert.match(text, /20 jobs finished \(1 unsuccessful, 0 unknown\)/);
+  assert.match(text, /inspect the listed log files/);
+  assert.doesNotMatch(text, /expand TUI/);
   for (const { completion: job } of jobs) assert.ok(text.includes(`Job [${job.id}]`));
   assert.match(text, /Job \[0j\] failed \(exit 1\)/);
   assert.match(text, /Completion details truncated/);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- Isolate active registries/logs by stable Pi session ID, preventing different threads from restoring, controlling or receiving each other's jobs. Leave legacy unscoped state untouched rather than guessing ownership.
+- Clear queued completion batches at session startup and replace exit hooks so stale runtime state cannot follow a session change.
+- Separate agent-only continuation guidance from TUI command previews and pi-lens-style blue start/input/termination acknowledgements; preserve call headers and outcome backgrounds.
+- Keep start results limited to command and acknowledgement even on expansion; retain process metadata in inspection/completion views, and point truncated agent feedback to inspectable logs rather than TUI controls.
+
 ## 0.8.0
 
 - Require a visible, nonblank descriptive title for every new bash_async call, in both schema and execution guards; retain legacy untitled-record fallbacks.

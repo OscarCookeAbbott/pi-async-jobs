@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { createBrowser } from "./browser.ts";
 import { completionKey, restoreCompletions, type HistoryCompletion } from "./history.ts";
 import { formatCompletions, formatJobLine, formatMetadata, formatStatus, jobLabel, jobMetadata, jobOutcome, type CompletionFeedback, type JobMetadata, type JobOutcome } from "./format.ts";
-import { DEFAULT_TIMEOUT, MAX_TIMEOUT, JobManager, TAIL_LINES, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
+import { DEFAULT_TIMEOUT, MAX_TIMEOUT, JobManager, TAIL_LINES, sessionJobsDir, tailFile, type JobCompletion, type JobStatus, type ShellCommand } from "./jobs.ts";
 
 type NotificationMode = "none" | "started" | "completed" | "all";
 
@@ -16,7 +16,9 @@ const uiText = (text: string): string => {
   const shown = truncateHead(text, { maxLines: 500, maxBytes: 30000 });
   return shown.content + (shown.truncated ? `\n${UI_TRUNCATION_NOTE}` : "");
 };
-function outputPreview(text: string, expanded: boolean, theme: Theme): Component {
+const highlight = (text: string): string => `\x1b[1m\x1b[38;2;96;165;250m${text}\x1b[39m\x1b[22m`;
+
+function outputPreview(text: string, expanded: boolean, theme: Theme, from: "start" | "end" = "end"): Component {
   if (expanded) return new Text(text, 0, 0);
   let lastWidth: number | undefined;
   let cached: string[] = [];
@@ -24,10 +26,11 @@ function outputPreview(text: string, expanded: boolean, theme: Theme): Component
     render(width) {
       if (width < 1) return [];
       if (width !== lastWidth) {
-        const preview = truncateToVisualLines(text, 5, width, 0, "end");
+        const preview = truncateToVisualLines(text, 5, width, 0, from);
         const key = keyText("app.tools.expand");
-        const hint = theme.fg("muted", `... (${preview.skippedCount} earlier lines; ${key ? `${key} to expand` : "expand for full output"})`);
-        cached = preview.skippedCount ? [truncateToWidth(hint, width), ...preview.visualLines] : preview.visualLines;
+        const hint = theme.fg("muted", `... (${preview.skippedCount} ${from === "start" ? "later" : "earlier"} lines; ${key ? `${key} to expand` : "expand for full output"})`);
+        const hintLines = preview.skippedCount ? [truncateToWidth(hint, width)] : [];
+        cached = from === "start" ? [...preview.visualLines, ...hintLines] : [...hintLines, ...preview.visualLines];
         lastWidth = width;
       }
       return cached;
@@ -98,14 +101,24 @@ function expandableMessage(message: MessageIdentity, expanded: boolean, build: (
   };
 }
 
-const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { expanded }, theme, context) => {
+const renderStartedResult: NonNullable<ToolDefinition["renderResult"]> = (result, options, theme, context) => {
+  const metadata = result.details as JobMetadata | undefined;
+  if (context?.isError || options.isPartial || typeof metadata?.command !== "string" || typeof metadata.id !== "string") return renderResult(result, options, theme, context);
+  const component = new Container();
+  component.addChild(outputPreview(theme.fg("toolOutput", uiText(metadata.command)), options.expanded, theme, "start"));
+  component.addChild(new Text(highlight(`Job [${metadata.id}] started.`), 0, 0));
+  return component;
+};
+
+const renderResult: NonNullable<ToolDefinition["renderResult"]> = (result, { expanded, isPartial }, theme, context) => {
   const text = result.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n");
   const metadata = result.details as (JobMetadata & { status?: JobStatus }) | undefined;
   const background = metadata?.status && outcomeBackground(jobOutcome(metadata.status));
   const color = context?.isError ? "error" : "toolOutput";
-  const [heading, ...body] = uiText(text).split("\n");
+  const [heading = "", ...body] = uiText(text).split("\n");
   const component = new Container();
-  component.addChild(new Text(theme.fg(color, heading!), 0, 0));
+  const emphasize = typeof metadata?.id === "string" && !context?.isError && !isPartial && (!metadata.status || metadata.status.running);
+  component.addChild(new Text(theme.fg(color, emphasize ? highlight(heading) : heading), 0, 0));
   if (body.length) component.addChild(outputPreview(theme.fg(color, body.join("\n")), expanded, theme));
   if (expanded && typeof metadata?.command === "string") component.addChild(new Text(theme.fg("muted", uiText(formatMetadata(metadata))), 0, 0));
   if (!background) return component;
@@ -325,6 +338,14 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     stopWidgetRefresh();
+    manager?.dispose();
+    manager = undefined;
+    removeExitHook?.();
+    removeExitHook = undefined;
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    pending = [];
+    pendingBatches.clear();
     restoreHistory(ctx);
     ctxRef = ctx;
     subscribeOverview();
@@ -338,10 +359,9 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     } catch (error) {
       ctx.ui.notify(`Async jobs: ${error instanceof Error ? error.message : String(error)} Desktop notifications disabled.`, "warning");
     }
-    manager?.dispose();
-    manager = new JobManager(undefined, { shell: resolveShell(ctx) });
     loadError = undefined;
     try {
+      manager = new JobManager(sessionJobsDir(ctx.sessionManager.getSessionId()), { shell: resolveShell(ctx) });
       const { restored, reaped } = await manager.load();
       if (restored.length) ctx.ui.notify(`Async jobs: re-attached to ${restored.join(", ")}.`, "info");
       else if (reaped.length) ctx.ui.notify(`Async jobs: cleaned up ${reaped.length} stale job(s).`, "info");
@@ -349,7 +369,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       loadError = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Async jobs registry failed to load: ${loadError}`, "error");
     }
-    manager.subscribe(enqueue);
+    manager?.subscribe(enqueue);
     removeNotificationHook = pi.events.on("notifications:prepare", (value) => {
       if (typeof value !== "object" || value === null || loadError) return;
       const draft = value as { event?: unknown; message?: string };
@@ -389,7 +409,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "bash_async",
     label: "Async Bash",
-    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Output is streamed to a log file; the agent must not poll. Every job requires a short descriptive title and a finite positive timeout; the default timeout is 60 seconds.",
+    description: "Run lengthy commands without blocking the agent, with automatic completion notifications. Do not poll.",
     promptSnippet: "Run lengthy commands without blocking the agent, with automatic completion notifications.",
     promptGuidelines: [
       "Always provide a short descriptive title stating the job's purpose, rather than copying a long command.",
@@ -409,7 +429,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       updateWidget();
       notifyChange("started", `Job [${jobId}] started.${record.title ? ` ${record.title}` : ""}`);
       return {
-        content: [{ type: "text", text: `Job [${jobId}] started in background. Continue independent work, or end your turn; completion will notify you automatically.` }],
+        content: [{ type: "text", text: `Job [${jobId}] started in background. Continue independent work or end your turn; completion will notify you automatically.` }],
         details: jobMetadata(jobId, record),
       };
     },
@@ -419,7 +439,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       const label = args.title ? jobLabel({ title: args.title, command: "" }) : args.command ?? "...";
       return new Text(theme.fg("toolTitle", theme.bold(`$ ${label}`)) + theme.fg("muted", ` (${suffix}) [async]`), 0, 0);
     },
-    renderResult,
+    renderResult: renderStartedResult,
   });
 
   pi.registerTool({

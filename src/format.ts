@@ -74,7 +74,7 @@ export function formatCompletions(jobs: readonly CompletionFeedback[]): string {
     ? directories.map((dir) => join(dir, "<id>.log")).join("; ")
     : jobs.map(({ completion: job }) => `[${job.id}] ${job.record.log_path}`).join("\n");
   const logs = truncateHead(`Logs: ${locations}`, { maxBytes: 4096, maxLines: 1000 });
-  const notice = "[Completion details truncated; expand TUI for full metadata and log paths.]";
+  const notice = "[Completion details truncated; inspect the listed log files.]";
   const budget = MAX_COMPLETION_BYTES - Buffer.byteLength(heading + logs.content + notice) - 8;
   // Keep statuses ahead of output so a verbose job cannot bury later failures.
   const headers = truncateHead(jobs.map(({ completion }) => summary(completion)).join("\n"), { maxBytes: Math.floor(budget / 2), maxLines: 10000 });

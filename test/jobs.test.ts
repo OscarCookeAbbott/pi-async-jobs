@@ -3,9 +3,9 @@ import crypto from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { allocateId, DEFAULT_TIMEOUT, ID_COUNT, MAX_TIMEOUT, JobManager, parseRegistry, tailFile, type JobCompletion, type Registry } from "../src/jobs.ts";
+import { allocateId, DEFAULT_TIMEOUT, ID_COUNT, MAX_TIMEOUT, JobManager, parseRegistry, sessionJobsDir, tailFile, type JobCompletion, type Registry } from "../src/jobs.ts";
 
 async function workspace(t: TestContext): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pi-jobs-test-"));
@@ -32,6 +32,16 @@ test("IDs avoid active entries and exhaustion is explicit", () => {
   assert.ok(!(last in registry));
   registry[last] = { pid: 1, pgid: 1, command: "x", log_path: "x", start_time: 0, timeout: 0 };
   assert.throws(() => allocateId(registry), /1296|ID space/);
+});
+
+test("session storage is stable, isolated and cannot escape its root", () => {
+  const root = join(tmpdir(), "pi-jobs-root");
+  assert.equal(sessionJobsDir("same", root), sessionJobsDir("same", root));
+  assert.notEqual(sessionJobsDir("same", root), sessionJobsDir("other", root));
+  const scoped = sessionJobsDir("../../session", root);
+  assert.equal(dirname(scoped), join(root, "sessions"));
+  assert.match(basename(scoped), /^[a-f0-9]{64}$/);
+  for (const id of ["", "   "]) assert.throws(() => sessionJobsDir(id, root), /session ID is required/);
 });
 
 test("registry parsing rejects malformed data", () => {

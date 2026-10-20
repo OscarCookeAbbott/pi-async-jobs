@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
 import { createEventBus, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -9,8 +10,9 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import extension from "../src/index.ts";
 import { formatCompletions, jobMetadata } from "../src/format.ts";
+import { sessionJobsDir, type JobStatus } from "../src/jobs.ts";
 
-type Details = { id: string; logPath: string; title?: string; command?: string };
+type Details = { id: string; logPath: string; title?: string; command?: string; status?: JobStatus };
 type OverviewData = { id: string; badge: string; sections: Array<{ title: string; items: Array<{ title: string; state: string; detail?: string }> }> };
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
@@ -21,7 +23,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
   }
 }
 
-function harness(dir: string, settings: Record<string, unknown> = {}) {
+function harness(dir: string, settings: Record<string, unknown> = {}, sessionId = randomUUID()) {
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => any>();
   const bus = createEventBus();
   const overview = new Map<string, OverviewData>();
@@ -43,7 +45,7 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
     mode: "tui",
     cwd: dir,
     isIdle: () => idle,
-    sessionManager: { getBranch: () => [] },
+    sessionManager: { getBranch: () => [], getSessionId: () => sessionId },
     ui: {
       setWidget: (key: string, content: unknown) => { widgetUpdates++; widgets.set(key, content); },
       notify: (text: string) => notifications.push(text),
@@ -79,7 +81,7 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
   } as unknown as ExtensionAPI);
   const emit = (name: string, event: any = {}) => handlers.get(name)?.(event, ctx);
   return {
-    dir, tools, messages, renderers, notifications, events, widgets, ctx, emit, bus, overview, views,
+    dir, sessionId, tools, messages, renderers, notifications, events, widgets, ctx, emit, bus, overview, views,
     get command() { return command; },
     get renderRequests() { return renderRequests; },
     get widgetUpdates() { return widgetUpdates; },
@@ -108,14 +110,100 @@ function harness(dir: string, settings: Record<string, unknown> = {}) {
 async function setup(t: TestContext, options: { corrupt?: boolean; configure?: (dir: string) => Promise<Record<string, unknown>> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "pi-jobs-ext-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  if (options.corrupt) await writeFile(join(dir, "registry.json"), "not json");
   const settings = options.configure ? await options.configure(dir) : {};
   process.env.PI_JOBS_DIR = dir;
   const h = harness(dir, settings);
+  if (options.corrupt) {
+    await mkdir(sessionJobsDir(h.sessionId), { recursive: true });
+    await writeFile(join(sessionJobsDir(h.sessionId), "registry.json"), "not json");
+  }
   t.after(() => { h.emit("session_shutdown"); delete process.env.PI_JOBS_DIR; });
   await h.emit("session_start");
   return h;
 }
+
+test("independent sessions never adopt, control or receive each other's jobs", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-jobs-isolation-"));
+  const previous = process.env.PI_JOBS_DIR;
+  process.env.PI_JOBS_DIR = dir;
+  const first = harness(dir);
+  const second = harness(dir);
+  const started: Array<{ harness: ReturnType<typeof harness>; id: string }> = [];
+  t.after(async () => {
+    for (const job of started) await job.harness.call("bash_kill", { id: job.id }).catch(() => {});
+    first.emit("session_shutdown");
+    second.emit("session_shutdown");
+    if (previous === undefined) delete process.env.PI_JOBS_DIR; else process.env.PI_JOBS_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+  await first.emit("session_start");
+  const one = await first.call("bash_async", { command: "sleep 30", title: "First thread only" });
+  started.push({ harness: first, id: one.details!.id });
+  await second.emit("session_start");
+  assert.deepEqual(second.widgetLines(), [], "a different thread must not restore the first thread's registry");
+  await assert.rejects(second.call("bash_check", { id: one.details!.id }), /Unknown job/);
+  await assert.rejects(second.call("bash_kill", { id: one.details!.id }), /Unknown job/);
+  const two = await second.call("bash_async", { command: "sleep 30", title: "Second thread only" });
+  started.push({ harness: second, id: two.details!.id });
+  assert.notEqual(dirname(one.details!.logPath), dirname(two.details!.logPath));
+  await second.call("bash_kill", { id: two.details!.id });
+  await waitUntil(() => second.messages.length === 1);
+  second.emit("session_shutdown");
+  assert.equal((await first.call("bash_check", { id: one.details!.id })).details?.status?.running, true);
+  assert.match(first.widgetLines().join("\n"), /First thread only/);
+  assert.equal(first.messages.length, 0);
+  await first.call("bash_kill", { id: one.details!.id });
+  await waitUntil(() => first.messages.length === 1);
+  assert.match(first.messages[0].message.content, /First thread only/);
+  assert.match(second.messages[0].message.content, /Second thread only/);
+  assert.doesNotMatch(second.messages[0].message.content, /First thread only/);
+});
+
+test("unscoped legacy registries are neither adopted nor rewritten", async (t) => {
+  const legacy = "unscoped registry must not be read";
+  const h = await setup(t, { configure: async (dir) => {
+    await writeFile(join(dir, "registry.json"), legacy);
+    return {};
+  } });
+  assert.deepEqual(h.notifications, []);
+  const started = await h.call("bash_async", { command: "printf scoped", title: "Scoped job" });
+  assert.equal(dirname(started.details!.logPath), sessionJobsDir(h.sessionId));
+  await waitUntil(() => h.messages.length === 1);
+  assert.equal(await readFile(join(h.dir, "registry.json"), "utf8"), legacy);
+});
+
+test("a session restores its own running jobs without duplicating completion delivery", async (t) => {
+  const h = await setup(t);
+  const started = await h.call("bash_async", { command: "sleep 30", title: "Own restored job" });
+  const id = started.details!.id;
+  await h.emit("session_start");
+  assert.ok(h.notifications.some((text) => text.includes(`re-attached to ${id}`)));
+  assert.equal((await h.call("bash_check", { id })).details?.id, id);
+  await h.call("bash_kill", { id });
+  await waitUntil(() => h.messages.length === 1);
+  assert.match(h.messages[0].message.content, /Own restored job/);
+});
+
+test("queued completions and acknowledgements do not cross a session startup boundary", async (t) => {
+  const h = await setup(t);
+  h.setAutoDeliver(false);
+  await h.call("bash_async", { command: "printf OLD_THREAD", title: "Old thread" });
+  await waitUntil(() => h.messages.length === 1);
+  assert.match(h.widgetLines().join("\n"), /Old thread/);
+  const nextSessionId = randomUUID();
+  Reflect.set(h.ctx.sessionManager, "getSessionId", () => nextSessionId);
+  await h.emit("session_start");
+  assert.deepEqual(h.widgetLines(), []);
+  const next = await h.call("bash_async", { command: "printf NEW_THREAD", title: "New thread" });
+  assert.equal(dirname(next.details!.logPath), sessionJobsDir(nextSessionId));
+  await waitUntil(() => h.messages.length === 2);
+  assert.match(h.messages[1].message.content, /NEW_THREAD/);
+  assert.doesNotMatch(h.messages[1].message.content, /OLD_THREAD/);
+  h.deliver(0);
+  assert.match(h.widgetLines().join("\n"), /New thread/);
+  h.deliver(1);
+  assert.deepEqual(h.widgetLines(), []);
+});
 
 test("menu shows only currently running jobs, with no badge or completion rows", async (t) => {
   const h = await setup(t);
@@ -238,6 +326,35 @@ test("async call headers use the built-in shell style and show the effective tim
   assert.deepEqual(styles, ["toolOutput", "error"]);
 });
 
+test("started jobs show commands and blue acknowledgements, not agent instructions", () => {
+  const h = harness("/unused");
+  const command = "printf 'ready\\n'";
+  const text = "Job [ab] started in background. Continue independent work or end your turn; completion will notify you automatically.";
+  const result = { content: [{ type: "text", text }], details: { id: "ab", pid: 123, pgid: 123, title: "Check readiness", command, logPath: "/tmp/ab.log" } };
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  const render = h.tools.get("bash_async")!.renderResult! as Function;
+  for (const expanded of [false, true]) {
+    const lines: string[] = render(result, { expanded }, theme, {}).render(200);
+    const output = lines.map((line) => line.trimEnd()).join("\n");
+    assert.match(output, /\x1b\[1m\x1b\[38;2;96;165;250mJob \[ab\] started\.\x1b\[39m\x1b\[22m/);
+    assert.ok(output.includes(command));
+    assert.equal(output.split(command).length - 1, 1);
+    assert.doesNotMatch(output, /Continue independent work|end your turn|notify you automatically/);
+    assert.equal(output, `${command}\n\x1b[1m\x1b[38;2;96;165;250mJob [ab] started.\x1b[39m\x1b[22m`);
+    assert.ok(render(result, { expanded }, theme, {}).render(12).every((line: string) => visibleWidth(line) <= 12));
+  }
+  assert.equal(result.content[0].text, text);
+  const long = { ...result, details: { ...result.details, command: "FIRST\n" + "middle\n".repeat(30) + "LAST" } };
+  const collapsed = render(long, { expanded: false }, theme, {}).render(80).join("\n");
+  assert.match(collapsed, /FIRST/);
+  assert.match(collapsed, /expand/);
+  assert.doesNotMatch(collapsed, /LAST/);
+  assert.match(render(long, { expanded: true }, theme, {}).render(80).join("\n"), /LAST/);
+  const failure = { content: [{ type: "text", text: "Registry unavailable." }], details: {} };
+  assert.match(render(failure, { expanded: false }, theme, { isError: true }).render(80).join("\n"), /Registry unavailable/);
+  assert.doesNotMatch(render(result, { expanded: false, isPartial: true }, theme, {}).render(200).join("\n"), /\x1b\[38;2;96;165;250mJob \[ab\] started/);
+});
+
 test("completion notifications retain themed backgrounds and configured padding", () => {
   const h = harness("/unused");
   for (const outputPad of [0, 2]) {
@@ -328,7 +445,7 @@ test("a finished job produces one merged completion frame and triggers a turn wh
   assert.equal(h.messages[0].message.customType, "async-jobs-completion");
   assert.equal(h.messages[0].options.triggerTurn, true);
   assert.match(h.messages[0].message.content, /Job \[[0-9a-z]{2}\] succeeded/);
-  assert.equal(h.text(started), `Job [${id}] started in background. Continue independent work, or end your turn; completion will notify you automatically.`);
+  assert.equal(h.text(started), `Job [${id}] started in background. Continue independent work or end your turn; completion will notify you automatically.`);
   assert.doesNotMatch(h.messages[0].message.content, /PID|PGID|Log[s]?:/);
   assert.match(h.messages[0].message.content, /printf/);
   assert.match(h.messages[0].message.content, /hi/);
@@ -547,9 +664,14 @@ test("large output stays bounded while expanded UI retains command and process m
   const render = h.tools.get("bash_async")!.renderResult! as Function;
   const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text };
   const expanded = render(started, { expanded: true }, theme, {}).render(200).join("\n");
-  assert.match(expanded, /PID.*PGID/);
-  assert.ok(expanded.includes(started.details!.logPath));
+  assert.ok(expanded.includes(command));
+  assert.doesNotMatch(expanded, /PID|PGID|Log:|Continue independent/);
+  assert.ok(!expanded.includes(started.details!.logPath));
   await waitUntil(() => h.messages.length === 1);
+  const status = await h.call("bash_check", { id: started.details!.id });
+  const inspected = (h.tools.get("bash_check")!.renderResult! as Function)(status, { expanded: true }, theme, {}).render(200).join("\n");
+  assert.match(inspected, /PID.*PGID/);
+  assert.ok(inspected.includes(started.details!.logPath));
   const { message } = h.messages[0];
   assert.ok(Buffer.byteLength(message.content) <= 16384);
   assert.match(message.content, /truncated/);
