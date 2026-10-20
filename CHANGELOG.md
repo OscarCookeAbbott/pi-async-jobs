@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1
+
+- Restore compact status-marker/ID/duration/title rows in the widget and browser, and ID/title-only overview rows.
+- Restore structured job metadata without sentence-style labels; preserve existing sentence-style completion/status feedback and bash-style timing footers.
+
 ## 0.10.0
 
 - Move successful completion/status UI durations to a blank-line-separated, muted `Took …` footer matching built-in bash; preserve runtime values and the output preview budget.

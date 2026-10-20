@@ -36,7 +36,8 @@ test("titles replace command summaries while expanded metadata retains the execu
   const text = formatCompletions([{ completion: titled, tail: { text: "", truncated: false } }]);
   assert.equal(text, "Job succeeded: [ab] Friendly build (14s)");
   const metadata = formatMetadata(jobMetadata(titled.id, titled.record));
-  assert.match(metadata, /Job: \[ab\] Friendly build/);
+  assert.match(metadata, /Job \[ab\] · PID/);
+  assert.match(metadata, /Title: Friendly build/);
   assert.match(metadata, /Command:\nnpm test/);
 });
 
@@ -60,21 +61,21 @@ test("widget rows stay single-line and keep compact durations ahead of long comm
   const command = "echo one\necho two\r\t\x1b[2A\x1b[31m💜\x1b[0m\x07";
   for (const [seconds, duration] of [[0, "0s"], [59, "59s"], [60, "1:00"], [3599, "59:59"], [3600, "1:00:00"]] as const) {
     const row = formatJobLine("ab", command, true, seconds);
-    assert.equal(row, `▶ Job running (${duration}): [ab] echo one echo two 💜`);
+    assert.equal(row, `▶ [ab] ${duration} echo one echo two 💜`);
     assert.ok(!/[\x00-\x1f\x7f-\x9f]/.test(row));
   }
 });
 
 test("finished job rows use distinct outcome markers", () => {
-  for (const [outcome, marker, label] of [
-    [jobOutcome({ exitCode: 0 }), "✓", "succeeded"],
-    [jobOutcome({ exitCode: 1 }), "✗", "failed"],
-    [jobOutcome({ exitCode: null, timedOut: true }), "⏱", "timed out"],
-    [jobOutcome({ exitCode: null, signal: "SIGINT" }), "⚠", "terminated"],
-    [jobOutcome({ exitCode: null }), "?", "finished"],
-    [jobOutcome({ running: true }), "▶", "running"],
+  for (const [outcome, marker] of [
+    [jobOutcome({ exitCode: 0 }), "✓"],
+    [jobOutcome({ exitCode: 1 }), "✗"],
+    [jobOutcome({ exitCode: null, timedOut: true }), "⏱"],
+    [jobOutcome({ exitCode: null, signal: "SIGINT" }), "⚠"],
+    [jobOutcome({ exitCode: null }), "?"],
+    [jobOutcome({ running: true }), "▶"],
   ] as const) {
-    assert.equal(formatJobLine("ab", "npm test", outcome === "running", 14, outcome), `${marker} Job ${label} (14s): [ab] npm test`);
+    assert.equal(formatJobLine("ab", "npm test", outcome === "running", 14, outcome), `${marker} [ab] 14s npm test`);
   }
 });
 

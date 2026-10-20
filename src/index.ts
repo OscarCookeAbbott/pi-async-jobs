@@ -200,7 +200,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     try {
       const active = loadError ? [] : (manager?.active() ?? []).filter(({ running }) => running);
       const items = active.map(({ id, record }) => ({
-        title: `Job running: [${id}] ${jobLabel(record)}`, state: "running", kind: "job", subtitle: `Running · timeout ${record.timeout}s`, body: record.command,
+        title: `[${id}] ${jobLabel(record)}`, state: "running", kind: "job", subtitle: `Running · timeout ${record.timeout}s`, body: record.command,
         detail: `${formatMetadata(jobMetadata(id, record))}\nStatus: Running\nTimeout: ${record.timeout}s`,
       }));
       if (!items.length) { pi.events.emit("overview:remove", "jobs"); return; }

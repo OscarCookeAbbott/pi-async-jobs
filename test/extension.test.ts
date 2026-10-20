@@ -211,7 +211,7 @@ test("menu shows only currently running jobs, with no badge or completion rows",
   const running = await h.call("bash_async", { command: "cat", title: "Live job", timeout: 120 });
   assert.equal(h.overview.get("jobs")!.badge, "");
   assert.equal(h.overview.get("jobs")!.sections[0].items[0].state, "running");
-  assert.equal(h.overview.get("jobs")!.sections[0].items[0].title, `Job running: [${running.details!.id}] Live job`);
+  assert.equal(h.overview.get("jobs")!.sections[0].items[0].title, `[${running.details!.id}] Live job`);
   await h.call("bash_async", { command: "true" });
   await waitUntil(() => h.messages.length === 1);
   assert.equal(h.overview.get("jobs")!.sections[0].items.length, 1);
@@ -678,8 +678,7 @@ test("persistent finished-job rows use status foregrounds, never thread outcome 
       bg: (value, text) => { backgrounds.push(value); return text; },
     });
     assert.match(finished[0]!, /1 finished/);
-    assert.ok(finished[1]!.startsWith(`${marker} Job `));
-    assert.ok(finished[1]!.includes(`: [${started.details!.id}] `));
+    assert.ok(finished[1]!.startsWith(`${marker} [${started.details!.id}] `));
     assert.ok(colors.includes(color));
     assert.deepEqual(backgrounds, []);
     h.deliver(index);

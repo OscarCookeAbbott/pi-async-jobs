@@ -98,7 +98,7 @@ export function formatJobDuration(seconds: number): string {
 }
 
 export function formatMetadata(metadata: JobMetadata): string {
-  return `Job: [${metadata.id}] ${jobLabel(metadata)}\nPID ${metadata.pid} · PGID ${metadata.pgid}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
+  return `Job [${metadata.id}] · PID ${metadata.pid} · PGID ${metadata.pgid}${metadata.title ? `\nTitle: ${commandLabel(metadata.title)}` : ""}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
 }
 
 export function formatJobLine(id: string, command: string, running: boolean, runtimeSeconds: number, outcome: JobOutcome = running ? "running" : "unknown"): string {
@@ -107,8 +107,7 @@ export function formatJobLine(id: string, command: string, running: boolean, run
   let duration = `${runtimeSeconds}s`;
   if (minutes >= 60) duration = `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${seconds}`;
   else if (minutes) duration = `${minutes}:${seconds}`;
-  const status: Record<JobOutcome, string> = { running: "running", success: "succeeded", failure: "failed", timeout: "timed out", signal: "terminated", unknown: "finished" };
-  return `${OUTCOME_GLYPHS[outcome]} Job ${status[outcome]} (${duration}): [${id}] ${commandLabel(command)}`;
+  return `${OUTCOME_GLYPHS[outcome]} [${id}] ${duration} ${commandLabel(command)}`;
 }
 
 export function jobMetadata(id: string, record: JobRecord): JobMetadata {
