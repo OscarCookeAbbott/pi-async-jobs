@@ -595,9 +595,9 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       ]);
       if (ctx.mode !== "tui") { ctx.ui.notify(items.map((item) => item.title).join("\n") || "No background jobs.", "info"); return; }
       await ctx.ui.custom<void>((tui, theme, _keys, done) => createBrowser({
-        title: "Jobs", items, theme, height: () => Math.max(1, tui.terminal.rows - 6),
+        title: "Jobs", items, theme, height: () => Math.max(1, tui.terminal.rows - 3),
         requestRender: () => tui.requestRender(), done,
-      }));
+      }), { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } });
     },
   });
 }

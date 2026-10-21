@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.2
+
+- Open `/jobs` as an exactly sized full-terminal overlay, hiding duplicate persistent headers while leaving widgets live underneath and restoring them on close.
+
 ## 0.10.1
 
 - Restore compact status-marker/ID/duration/title rows in the widget and browser, and ID/title-only overview rows.

@@ -7,7 +7,7 @@ import { test, type TestContext } from "node:test";
 import { validateToolArguments, type JsonObject } from "@earendil-works/pi-ai";
 import { stripVTControlCharacters } from "node:util";
 import { createBashToolDefinition, createEventBus, initTheme, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { compositeTuiLine, visibleWidth } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import extension from "../src/index.ts";
 import { formatCompletions, formatStatus, jobMetadata } from "../src/format.ts";
@@ -255,6 +255,29 @@ test("full-view history restores all completions without republishing finished j
   await h.command.handler("", h.ctx);
   assert.match(h.views[0][0], /1\/60 selected/);
   assert.deepEqual(h.widgetLines(), [], "history must not repopulate acknowledged widget rows");
+});
+
+test("full job browser covers the exact viewport while persistent status continues underneath", async (t) => {
+  const h = await setup(t);
+  h.setAutoDeliver(false);
+  await h.call("bash_async", { command: "true" });
+  await waitUntil(() => h.messages.length === 1);
+  const widget = h.widgets.get("async-jobs");
+  Reflect.set(h.ctx.ui, "custom", async (factory: Function, options: unknown) => {
+    assert.deepEqual(options, { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } });
+    const tui = { terminal: { rows: 12 }, requestRender() {} };
+    const view = factory(tui, { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text }, {}, () => {});
+    for (const rows of [8, 12, 24]) {
+      tui.terminal.rows = rows;
+      const lines = view.render(80);
+      assert.equal(lines.length, rows);
+      assert.match(lines[0], /^Jobs/);
+      for (const line of lines) assert.doesNotMatch(stripVTControlCharacters(compositeTuiLine("PERSISTENT Jobs header", line, 0, 80, 80)), /PERSISTENT/);
+    }
+    view.handleInput("\u001b");
+  });
+  await h.command.handler("", h.ctx);
+  assert.equal(h.widgets.get("async-jobs"), widget);
 });
 
 test("registers the four background tools and validates their arguments", async (t) => {
