@@ -412,6 +412,9 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     updateWidget();
   });
 
+  // A supervising process can stop jobs before Pi waits for the active turn to abort.
+  pi.events.on("session:stopping", () => { manager?.killAllSync(); });
+
   pi.on("session_shutdown", () => {
     notificationMode = "none";
     removeOverviewHook?.();
