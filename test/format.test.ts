@@ -57,26 +57,22 @@ test("batched notifications bound output without burying later job statuses",  (
   assert.match(text, /Logs:/);
 });
 
-test("widget rows stay single-line and keep compact durations ahead of long commands", () => {
+test("widget rows stay single-line and end with compact durations", () => {
   const command = "echo one\necho two\r\t\x1b[2A\x1b[31m💜\x1b[0m\x07";
   for (const [seconds, duration] of [[0, "0s"], [59, "59s"], [60, "1:00"], [3599, "59:59"], [3600, "1:00:00"]] as const) {
-    const row = formatJobLine("ab", command, true, seconds);
-    assert.equal(row, `▶ [ab] ${duration} echo one echo two 💜`);
+    const row = formatJobLine("ab", command, seconds);
+    assert.equal(row, `[ab] echo one echo two 💜 · ${duration}`);
     assert.ok(!/[\x00-\x1f\x7f-\x9f]/.test(row));
   }
 });
 
-test("finished job rows use distinct outcome markers", () => {
-  for (const [outcome, marker] of [
-    [jobOutcome({ exitCode: 0 }), "✓"],
-    [jobOutcome({ exitCode: 1 }), "✗"],
-    [jobOutcome({ exitCode: null, timedOut: true }), "⏱"],
-    [jobOutcome({ exitCode: null, signal: "SIGINT" }), "⚠"],
-    [jobOutcome({ exitCode: null }), "?"],
-    [jobOutcome({ running: true }), "▶"],
-  ] as const) {
-    assert.equal(formatJobLine("ab", "npm test", outcome === "running", 14, outcome), `${marker} [ab] 14s npm test`);
-  }
+test("job outcomes remain distinct for color coding", () => {
+  assert.equal(jobOutcome({ exitCode: 0 }), "success");
+  assert.equal(jobOutcome({ exitCode: 1 }), "failure");
+  assert.equal(jobOutcome({ exitCode: null, timedOut: true }), "timeout");
+  assert.equal(jobOutcome({ exitCode: null, signal: "SIGINT" }), "signal");
+  assert.equal(jobOutcome({ exitCode: null }), "unknown");
+  assert.equal(jobOutcome({ running: true }), "running");
 });
 
 test("large command labels and batches remain bounded and valid Unicode", () => {

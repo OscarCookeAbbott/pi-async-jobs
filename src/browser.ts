@@ -31,9 +31,9 @@ export function createBrowser(options: BrowserOptions): Component {
       if (!items.length) return ["No items."];
       return items.flatMap((item, index) => {
         const open = expanded.has(index);
-        const label = `${index === selected ? "›" : " "} ${open ? "−" : "+"} ${clean(item.title).replace(/\n/g, " ")}`;
+        const label = theme.fg(item.color ?? "toolOutput", truncateToWidth(clean(item.title).replace(/\n/g, " "), width));
         const paint = (text: string) => item.background ? theme.bg(item.background, truncateToWidth(text, width, undefined, true)) : text;
-        const lines = [paint(theme.fg(index === selected ? "accent" : item.color ?? "toolOutput", truncateToWidth(label, width)))];
+        const lines = [index === selected ? theme.bg("selectedBg", truncateToWidth(label, width, undefined, true)) : paint(label)];
         if (open) for (const part of clean(item.detail).split("\n")) {
           for (const line of wrapTextWithAnsi(part, Math.max(1, width - 2))) lines.push(paint(theme.fg(item.color ?? "toolOutput", truncateToWidth(`  ${line}`, width))));
         }

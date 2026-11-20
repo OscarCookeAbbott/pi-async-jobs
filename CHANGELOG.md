@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.3
+
+- Remove leading job markers, keep outcome colours, and place elapsed time after the title.
+- Stop background jobs before supervised Pi sessions tear down.
+
 ## 0.10.2
 
 - Open `/jobs` as an exactly sized full-terminal overlay, hiding duplicate persistent headers while leaving widgets live underneath and restoring them on close.

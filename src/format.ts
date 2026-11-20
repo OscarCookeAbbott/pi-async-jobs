@@ -1,6 +1,7 @@
 import { basename, dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { truncateHead } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { JobCompletion, JobRecord, JobStatus, LogTail } from "./jobs.ts";
 
 export const MAX_COMPLETION_BYTES = 16 * 1024;
@@ -33,15 +34,6 @@ export function jobOutcome(job: JobOutcomeInput): JobOutcome {
   if (job.exitCode === null || job.exitCode === undefined) return "unknown";
   return "failure";
 }
-
-const OUTCOME_GLYPHS: Record<JobOutcome, string> = {
-  running: "▶",
-  success: "✓",
-  failure: "✗",
-  timeout: "⏱",
-  signal: "⚠",
-  unknown: "?",
-};
 
 export function formatJobSummary(job: JobCompletion | JobStatus, includeRuntime = true): string {
   const status = "running" in job && job.running ? "running"
@@ -101,13 +93,18 @@ export function formatMetadata(metadata: JobMetadata): string {
   return `Job [${metadata.id}] · PID ${metadata.pid} · PGID ${metadata.pgid}${metadata.title ? `\nTitle: ${commandLabel(metadata.title)}` : ""}\nLog: ${metadata.logPath}\nCommand:\n${metadata.command}`;
 }
 
-export function formatJobLine(id: string, command: string, running: boolean, runtimeSeconds: number, outcome: JobOutcome = running ? "running" : "unknown"): string {
+export function formatJobLine(id: string, command: string, runtimeSeconds: number, width?: number): string {
   const minutes = Math.floor(runtimeSeconds / 60);
   const seconds = String(runtimeSeconds % 60).padStart(2, "0");
   let duration = `${runtimeSeconds}s`;
   if (minutes >= 60) duration = `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${seconds}`;
   else if (minutes) duration = `${minutes}:${seconds}`;
-  return `${OUTCOME_GLYPHS[outcome]} [${id}] ${duration} ${commandLabel(command)}`;
+  const label = `[${id}] ${commandLabel(command)}`;
+  const suffix = ` · ${duration}`;
+  if (width === undefined) return label + suffix;
+  const labelWidth = width - visibleWidth(suffix);
+  if (labelWidth < 4) return truncateToWidth(label, width);
+  return stripVTControlCharacters(truncateToWidth(label, labelWidth)).trimEnd() + suffix;
 }
 
 export function jobMetadata(id: string, record: JobRecord): JobMetadata {

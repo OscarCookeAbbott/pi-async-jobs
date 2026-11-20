@@ -691,7 +691,7 @@ test("queue failures retain finished jobs for a later delivery attempt", async (
 test("persistent finished-job rows use status foregrounds, never thread outcome backgrounds", async (t) => {
   const h = await setup(t);
   h.setAutoDeliver(false);
-  for (const [index, command, color, marker] of [[0, "exit 3", "error", "✗"], [1, "true", "success", "✓"]] as const) {
+  for (const [index, command, color] of [[0, "exit 3", "error"], [1, "true", "success"]] as const) {
     const started = await h.call("bash_async", { command });
     await waitUntil(() => h.messages.length === index + 1);
     const colors: string[] = [];
@@ -701,7 +701,8 @@ test("persistent finished-job rows use status foregrounds, never thread outcome 
       bg: (value, text) => { backgrounds.push(value); return text; },
     });
     assert.match(finished[0]!, /1 finished/);
-    assert.ok(finished[1]!.startsWith(`${marker} [${started.details!.id}] `));
+    assert.ok(finished[1]!.startsWith(`[${started.details!.id}] `));
+    assert.match(finished[1]!, / · \d+s$/);
     assert.ok(colors.includes(color));
     assert.deepEqual(backgrounds, []);
     h.deliver(index);

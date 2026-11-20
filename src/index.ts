@@ -248,8 +248,8 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
           const now = Math.floor(Date.now() / 1000);
           return [
             heading,
-            ...jobs.slice(0, 6).map(({ id, record, running, outcome, runtimeSeconds }) => {
-              return truncateToWidth(theme.fg(WIDGET_OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, running, runtimeSeconds ?? Math.max(0, now - record.start_time), outcome)), width);
+            ...jobs.slice(0, 6).map(({ id, record, outcome, runtimeSeconds }) => {
+              return truncateToWidth(theme.fg(WIDGET_OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, runtimeSeconds ?? Math.max(0, now - record.start_time), width)), width);
             }),
           ];
         },
@@ -587,12 +587,12 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
           let detail = formatMetadata(jobMetadata(id, record));
           try { detail += `\n\n${formatStatus(await requireManager().check(id))}`; }
           catch (error) { detail += `\nStatus unavailable: ${error instanceof Error ? error.message : String(error)}`; }
-          return { title: formatJobLine(id, record.title ?? record.command, running, Math.max(0, Math.floor(Date.now() / 1000) - record.start_time)), detail };
+          return { title: formatJobLine(id, record.title ?? record.command, Math.max(0, Math.floor(Date.now() / 1000) - record.start_time)), detail, color: WIDGET_OUTCOME_COLORS[jobOutcome({ running })] };
         }),
         ...[...history.values()].reverse().map(async (completion) => ({
-          title: formatJobLine(completion.id, completion.record.title ?? completion.record.command, false, completion.runtimeSeconds, jobOutcome(completion)),
+          title: formatJobLine(completion.id, completion.record.title ?? completion.record.command, completion.runtimeSeconds),
           detail: `${formatMetadata(jobMetadata(completion.id, completion.record))}\n\n${formatStatus({ ...completion, running: false, tail: completion.tail ?? { text: "[No archived log preview is available; historical log paths may be reused.]", truncated: false } })}${pending.some((job) => completionKey(job) === completionKey(completion)) ? "\nAwaiting agent delivery." : ""}`,
-          color: OUTCOME_COLORS[jobOutcome(completion)],
+          color: WIDGET_OUTCOME_COLORS[jobOutcome(completion)],
           background: outcomeBackground(jobOutcome(completion)),
         })),
       ]);
