@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 import { getShellConfig, keyText, truncateHead, truncateToVisualLines, type ExtensionAPI, type ExtensionContext, type Theme, type ThemeColor, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -152,6 +153,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
   let flushTimer: NodeJS.Timeout | undefined;
   let refreshTimer: NodeJS.Timeout | undefined;
   let requestWidgetRender: (() => void) | undefined;
+  let expandedJob: string | undefined;
   let removeExitHook: (() => void) | undefined;
   let removeNotificationHook: (() => void) | undefined;
   let removeOverviewHook: (() => void) | undefined;
@@ -231,6 +233,9 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
       ...active.map(({ id, record, running }) => ({ id, record, running, outcome: jobOutcome({ running }), runtimeSeconds: undefined })),
       ...finished,
     ];
+    const shown = jobs.slice(0, 6);
+    const rowKey = ({ id, record }: (typeof jobs)[number]) => `${id}:${record.pid}:${record.start_time}`;
+    if (!shown.some((job) => rowKey(job) === expandedJob)) expandedJob = undefined;
     if (!jobs.length) {
       stopWidgetRefresh();
       ctx.ui.setWidget("async-jobs", undefined);
@@ -242,16 +247,30 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     const headingText = ["Jobs", runningCount ? `${runningCount} running` : "", finishedCount ? `${finishedCount} finished` : "", jobs.length > 6 ? `Showing 1-6/${jobs.length}` : ""].filter(Boolean).join(" · ");
     ctx.ui.setWidget("async-jobs", (tui, theme) => {
       requestWidgetRender = () => tui.requestRender();
+      const hitRows = new Map<number, string>();
       return {
         render(width: number): string[] {
-          const heading = truncateToWidth(theme.fg("muted", headingText), width);
+          hitRows.clear();
+          const lines = [theme.fg("muted", headingText)];
           const now = Math.floor(Date.now() / 1000);
-          return [
-            heading,
-            ...jobs.slice(0, 6).map(({ id, record, outcome, runtimeSeconds }) => {
-              return truncateToWidth(theme.fg(WIDGET_OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, runtimeSeconds ?? Math.max(0, now - record.start_time), width)), width);
-            }),
-          ];
+          for (const job of shown) {
+            const { id, record, outcome, runtimeSeconds } = job;
+            const key = rowKey(job);
+            hitRows.set(lines.length, key);
+            lines.push(theme.fg(WIDGET_OUTCOME_COLORS[outcome], formatJobLine(id, record.title ?? record.command, runtimeSeconds ?? Math.max(0, now - record.start_time), width)));
+            if (key !== expandedJob) continue;
+            const command = stripVTControlCharacters(record.command).replace(/\s+/g, " ").replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim();
+            lines.push(theme.fg("muted", `  ${outcome} · PID ${record.pid} · timeout ${record.timeout}s`));
+            lines.push(theme.fg("muted", `  Command: ${command}`));
+          }
+          return lines.map((line) => truncateToWidth(line, width, "…"));
+        },
+        handleMouse(event) {
+          const key = hitRows.get(event.y);
+          if (event.type !== "click" || event.button !== "left" || !key) return;
+          expandedJob = expandedJob === key ? undefined : key;
+          tui.requestRender();
+          return { handled: true };
         },
         invalidate() {},
       };
@@ -429,6 +448,7 @@ export default function asyncJobsExtension(pi: ExtensionAPI): void {
     flushTimer = undefined;
     pending = [];
     history.clear();
+    expandedJob = undefined;
     pendingBatches.clear();
     manager?.dispose();
     manager = undefined;

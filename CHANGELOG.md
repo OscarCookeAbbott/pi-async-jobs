@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0
+
+- Click a job in the fullscreen widget to toggle a compact process metadata and command preview without moving editor focus.
+
 ## 0.10.3
 
 - Remove leading job markers, keep outcome colours, and place elapsed time after the title.
