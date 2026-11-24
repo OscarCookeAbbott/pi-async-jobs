@@ -182,8 +182,13 @@ export class JobManager {
     return () => this.listeners.delete(listener);
   }
 
+  private isRunning(id: string, record: JobRecord): boolean {
+    // An owned job may still be draining output after its shell exits.
+    return this.children.has(id) || isAlive(record.pid);
+  }
+
   active(): Array<{ id: string; record: JobRecord; running: boolean }> {
-    return Object.entries(this.registry).map(([id, record]) => ({ id, record, running: isAlive(record.pid) }));
+    return Object.entries(this.registry).map(([id, record]) => ({ id, record, running: this.isRunning(id, record) }));
   }
 
   get(id: string): JobRecord | undefined {
@@ -273,11 +278,10 @@ export class JobManager {
   async check(id: string, tailLines = TAIL_LINES): Promise<JobStatus> {
     const active = this.registry[id];
     if (active) {
-      const running = this.children.has(id) || isAlive(active.pid);
       return {
         id,
         record: active,
-        running,
+        running: this.isRunning(id, active),
         exitCode: null,
         signal: null,
         timedOut: this.timedOut.has(id),

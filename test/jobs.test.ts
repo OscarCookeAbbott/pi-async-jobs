@@ -5,7 +5,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { allocateId, DEFAULT_TIMEOUT, ID_COUNT, MAX_TIMEOUT, JobManager, parseRegistry, sessionJobsDir, tailFile, type JobCompletion, type Registry } from "../src/jobs.ts";
+import { setTimeout as delay } from "node:timers/promises";
+import { allocateId, DEFAULT_TIMEOUT, ID_COUNT, isAlive, MAX_TIMEOUT, JobManager, parseRegistry, sessionJobsDir, tailFile, type JobCompletion, type Registry } from "../src/jobs.ts";
 
 async function workspace(t: TestContext): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pi-jobs-test-"));
@@ -77,6 +78,23 @@ test("restored legacy unlimited jobs are persisted with a finite deadline and ex
   assert.equal(second.get(id)?.timeout, DEFAULT_TIMEOUT);
   assert.equal(JSON.parse(await readFile(second.registryPath, "utf8"))[id].timeout, DEFAULT_TIMEOUT);
   assert.equal((await done).timedOut, true);
+});
+
+test("active and check agree while an owned job's output pipes are still open", { timeout: 5000 }, async (t) => {
+  const manager = new JobManager(await workspace(t));
+  const completion = waitCompletion(manager);
+  const { id, record } = await manager.start("sleep 30 & exit 0");
+  try {
+    const deadline = Date.now() + 2000;
+    while (isAlive(record.pid) && Date.now() < deadline) await delay(10);
+    assert.equal(isAlive(record.pid), false, "shell should exit while the descendant holds its output pipes");
+    assert.ok((await manager.check(id)).running);
+    assert.equal(manager.active().find((job) => job.id === id)?.running, true);
+  } finally {
+    manager.killAllSync();
+    await completion;
+    manager.dispose();
+  }
 });
 
 test("tailFile returns the last lines without loading the whole file",  async (t) => {

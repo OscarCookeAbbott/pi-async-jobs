@@ -540,14 +540,21 @@ test("fullscreen widget clicks reveal only the selected job command and metadata
   const first = await h.call("bash_async", { title: "First job", command: "cat # first command " + "x".repeat(100) });
   const second = await h.call("bash_async", { title: "Second job", command: "cat # second command" });
   const widget = h.widgets.get("async-jobs")({ requestRender() {} }, { fg: (_color: string, text: string) => text });
-  const click = (y: number) => widget.handleMouse({ type: "click", button: "left", y });
+  const click = (title: string) => {
+    const rowOf = (lines: string[]) => lines.findIndex((line) => line.includes(title));
+    const y = rowOf(widget.render(50));
+    assert.ok(y > 0, `Expected a row for ${title}`);
+    assert.deepEqual(widget.handleMouse({ type: "click", button: "left", y }), { handled: true });
+    const expanded = widget.render(50);
+    const row = rowOf(expanded);
+    return expanded.slice(row + 1, row + 3);
+  };
   assert.equal(widget.render(50).length, 3);
-  assert.deepEqual(click(1), { handled: true });
-  assert.match(widget.render(50)[2], /running · PID/);
-  assert.match(widget.render(50)[3], /first command/);
+  const [metadata, command] = click("First job");
+  assert.match(metadata, /running · PID/);
+  assert.match(command, /first command/);
   assert.ok(widget.render(50).every((line: string) => visibleWidth(line) <= 50));
-  assert.deepEqual(click(4), { handled: true });
-  assert.match(widget.render(50)[4], /second command/);
+  assert.match(click("Second job")[1], /second command/);
   assert.doesNotMatch(widget.render(50).join("\n"), /first command/);
   await h.call("bash_kill", { id: first.details!.id });
   await h.call("bash_kill", { id: second.details!.id });

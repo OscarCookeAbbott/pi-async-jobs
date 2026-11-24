@@ -10,7 +10,7 @@ Requires Node 22.19 or newer and Pi. Tested against **Pi 1.2.0**; older Pi relea
 pi install git:github.com/OscarCookeAbbott/pi-async-jobs
 ```
 
-Before loading this update, wait for jobs in all Pi instances to finish; older versions can signal adopted foreign jobs during shutdown (see State and recovery). Then start a new session or run `/reload`. For a pinned release, append `@v0.11.0` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
+Before loading this update, wait for jobs in all Pi instances to finish; older versions can signal adopted foreign jobs during shutdown (see State and recovery). Then start a new session or run `/reload`. For a pinned release, append `@v0.11.1` to the source. Unpinned installs follow the repository's default branch when running `pi update --extensions`.
 
 Use `pi install --local <source>` for a project-scoped installation; Pi loads it after project trust is granted. To uninstall:
 

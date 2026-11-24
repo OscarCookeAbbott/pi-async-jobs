@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1
+
+- Keep the widget and `bash_check` in agreement while an owned job's output is still draining.
+
 ## 0.11.0
 
 - Click a job in the fullscreen widget to toggle a compact process metadata and command preview without moving editor focus.
